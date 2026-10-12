@@ -1,0 +1,7 @@
+SOURCE,TARGET_TABLE,FILE_SIGNATURE,EXTENSION
+ORACLE_FUSION,ERP_AP_INVOICE_HEADER,invoiceheaderextractpvo,.csv
+ORACLE_FUSION,ERP_AP_INVOICE_LINES,invoicelinesextractpvo,.csv
+ORACLE_FUSION,ERP_AP_INVOICE_DIST,invoicedistributionextractpvo,.csv
+ORACLE_FUSION,ERP_PO_HEADERS,poheadersextractpvo,.csv
+ORACLE_FUSION,ERP_PO_LINES,polinesextractpvo,.csv
+ORACLE_FUSION,ERP_USER,userpvo,.csv
