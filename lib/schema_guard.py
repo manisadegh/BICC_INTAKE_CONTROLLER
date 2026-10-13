@@ -1,6 +1,9 @@
 import csv
 import re
 import logging
+import zipfile
+import io
+import gzip
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -21,15 +24,29 @@ def clean_column_name(col_raw):
 
 def extract_csv_columns(file_path):
     """
-    Reads the header line (line 1) from the CSV file and returns an ordered list
-    of sanitized column names.
+    Reads the header line (line 1) from the CSV file (or CSV inside ZIP/GZ archive)
+    and returns an ordered list of sanitized column names.
     Supports comma, semicolon, or tab delimiters.
     """
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        first_line = f.readline().strip()
+    first_line = ""
+    lower_path = file_path.lower()
+
+    if lower_path.endswith('.zip'):
+        with zipfile.ZipFile(file_path, 'r') as z:
+            csv_members = [n for n in z.namelist() if n.lower().endswith('.csv')]
+            if not csv_members:
+                raise ValueError(f"No CSV file found inside ZIP archive '{file_path}'.")
+            with z.open(csv_members[0], 'r') as f:
+                first_line = io.TextIOWrapper(f, encoding='utf-8', errors='replace').readline().strip()
+    elif lower_path.endswith('.gz'):
+        with gzip.open(file_path, 'rt', encoding='utf-8', errors='replace') as f:
+            first_line = f.readline().strip()
+    else:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            first_line = f.readline().strip()
 
     if not first_line:
-        raise ValueError(f"CSV file '{file_path}' has an empty header line.")
+        raise ValueError(f"File '{file_path}' has an empty header line.")
 
     # Detect delimiter
     if ';' in first_line:
@@ -94,12 +111,13 @@ def load_entity_mappings(mapping_file, filter_source="ORACLE_FUSION"):
 def match_target_table_for_file(filename, mapping_rules):
     """
     Matches a given data filename against loaded mapping rules to resolve the target table.
+    Supports single or comma-separated extensions (e.g. '.csv,.zip').
     """
     fn_lower = filename.lower()
     for rule in mapping_rules:
         if rule["signature"] in fn_lower:
             ext = rule["extension"]
-            if not ext or ext == '*' or fn_lower.endswith(ext):
+            if not ext or ext == '*' or fn_lower.endswith(ext) or any(fn_lower.endswith(e.strip()) for e in ext.split(',')):
                 return rule["target_table"]
     return None
 
