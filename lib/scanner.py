@@ -80,7 +80,7 @@ def read_declared_files_from_manifest(manifest_path):
     with open(manifest_path, 'r', encoding='utf-8') as f:
         for line in f:
             line_str = line.strip()
-            if not line_str or line_str.startswith('#'):
+            if not line_str or line_str.startswith('#') or '=' in line_str:
                 continue
             
             # Split if CSV/tab/semicolon
