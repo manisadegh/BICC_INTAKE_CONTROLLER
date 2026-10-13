@@ -51,18 +51,27 @@ def setup_logger(logs_dir):
 def get_teradata_connection(td_cfg):
     """
     Establishes connection to Teradata Vantage.
+    Supports environment variables (TDPID, TDENV, SID_ADM_USER) and 
+    stored encrypted passwords via Key/Pass property files.
     """
+    host = td_cfg.get("host") or os.environ.get("TDPID")
+    env_user = f"{os.environ.get('TDENV', '')}{os.environ.get('SID_ADM_USER', '')}" if os.environ.get("SID_ADM_USER") else os.environ.get("USER")
+    user = td_cfg.get("user") or env_user
+
     kwargs = {
-        "host": td_cfg["host"],
-        "user": td_cfg["user"],
+        "host": host,
+        "user": user,
         "logmech": td_cfg.get("logmech", "TD2")
     }
-    if "password" in td_cfg and not td_cfg["password"].startswith("ENCRYPTED"):
+    
+    if "key_file" in td_cfg and "pass_file" in td_cfg:
+        kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
+    elif "pass_file" in td_cfg and "key_file" in td_cfg:
+        kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
+    elif "password" in td_cfg and td_cfg["password"]:
         kwargs["password"] = td_cfg["password"]
-    if "pass_file" in td_cfg:
-        kwargs["pass_file"] = td_cfg["pass_file"]
-    if "key_file" in td_cfg:
-        kwargs["key_file"] = td_cfg["key_file"]
+    elif os.environ.get("TD_PASSWORD"):
+        kwargs["password"] = os.environ.get("TD_PASSWORD")
 
     return teradatasql.connect(**kwargs)
 
