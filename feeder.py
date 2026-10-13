@@ -51,12 +51,20 @@ def setup_logger(logs_dir):
 def get_teradata_connection(td_cfg):
     """
     Establishes connection to Teradata Vantage.
-    Supports environment variables (TDPID, TDENV, SID_ADM_USER) and 
-    stored encrypted passwords via Key/Pass property files.
+    Supports config keys ('host', 'server', 'tdpid'), environment variables (TDPID, TDENV, SID_ADM_USER),
+    and stored encrypted passwords via Key/Pass property files.
     """
-    host = td_cfg.get("host") or os.environ.get("TDPID")
+    if td_cfg is None:
+        td_cfg = {}
+
+    host = td_cfg.get("host") or td_cfg.get("server") or td_cfg.get("tdpid") or os.environ.get("TDPID")
+    if not host:
+        raise ValueError("Teradata host/server not configured. Provide 'host' (or 'server') in config.json or export TDPID.")
+
     env_user = f"{os.environ.get('TDENV', '')}{os.environ.get('SID_ADM_USER', '')}" if os.environ.get("SID_ADM_USER") else os.environ.get("USER")
-    user = td_cfg.get("user") or env_user
+    user = td_cfg.get("user") or td_cfg.get("username") or env_user
+    if not user:
+        raise ValueError("Teradata user not configured. Provide 'user' in config.json or export TDENV and SID_ADM_USER.")
 
     kwargs = {
         "host": host,
@@ -64,14 +72,22 @@ def get_teradata_connection(td_cfg):
         "logmech": td_cfg.get("logmech", "TD2")
     }
     
+    # 1. Direct key_file and pass_file configuration
     if "key_file" in td_cfg and "pass_file" in td_cfg:
         kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
     elif "pass_file" in td_cfg and "key_file" in td_cfg:
         kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
     elif "password" in td_cfg and td_cfg["password"]:
         kwargs["password"] = td_cfg["password"]
-    elif os.environ.get("TD_PASSWORD"):
-        kwargs["password"] = os.environ.get("TD_PASSWORD")
+    else:
+        # 2. Check for matching property files in ~/.dbt or $DBT_PROFILE_DIR
+        dbt_dir = os.environ.get("DBT_PROFILE_DIR") or os.path.expanduser("~/.dbt")
+        auto_key = os.path.join(dbt_dir, f"{user}_Key.properties")
+        auto_pass = os.path.join(dbt_dir, f"{user}_Pass.properties")
+        if os.path.exists(auto_key) and os.path.exists(auto_pass):
+            kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{auto_key},file:{auto_pass})"
+        elif os.environ.get("TD_PASSWORD"):
+            kwargs["password"] = os.environ.get("TD_PASSWORD")
 
     return teradatasql.connect(**kwargs)
 
