@@ -167,13 +167,14 @@ def generate_staging_ddl(target_db, target_table, columns, default_type="VARCHAR
     cols_sql.append("    INFA_LAST_REPLICATED TIMESTAMP(0)")
     cols_sql.append("    INFA_BATCH_ID VARCHAR(100) CHARACTER SET UNICODE NOT CASESPECIFIC")
 
+    cols_joined = ',\n'.join(cols_sql)
     ddl = f"""CREATE MULTISET TABLE {target_db}.{target_table} ,NO FALLBACK ,
      NO BEFORE JOURNAL,
      NO AFTER JOURNAL,
      CHECKSUM = DEFAULT,
      DEFAULT MERGEBLOCKRATIO
      (
-{',\n'.join(cols_sql)}
+{cols_joined}
      )
 NO PRIMARY INDEX;"""
 
