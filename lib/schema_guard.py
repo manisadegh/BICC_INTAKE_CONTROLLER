@@ -1,15 +1,16 @@
 """
 lib/schema_guard.py - Schema Guard & Automated NOPI DDL Synchronizer
 
-Performs in-memory header inspection (including streaming from .zip archives),
-compares extracted columns against Teradata Vantage DBC.ColumnsV, and automatically
-generates and executes NOPI VARCHAR(4000) table recreation upon schema drift.
+Performs in-memory header inspection (including streaming from .zip archives for both
+.csv and .pecsv members), compares extracted columns against Teradata Vantage DBC.ColumnsV,
+and automatically generates and executes NOPI VARCHAR(4000) table recreation upon schema drift.
 """
 
 import csv
 import gzip
 import io
 import logging
+import os
 import re
 import zipfile
 
@@ -32,22 +33,48 @@ def clean_column_name(col_raw: str) -> str:
     return col.upper()
 
 
+def inspect_file_inner_extension(file_path: str) -> str:
+    """
+    Returns the effective inner extension of a file.
+    If the file is a .zip archive, inspects its members in memory:
+      - Returns '.pecsv' if any member ends in .pecsv (Active Keys)
+      - Returns '.csv' if any member ends in .csv (Data Payload)
+      - Falls back to the extension of the first member
+    If uncompressed, returns the file's own extension (e.g. '.csv', '.pecsv').
+    """
+    lower_p = file_path.lower()
+    if lower_p.endswith(".zip") and os.path.exists(file_path):
+        try:
+            with zipfile.ZipFile(file_path, "r") as z:
+                names = [n.lower() for n in z.namelist()]
+                if any(n.endswith(".pecsv") for n in names):
+                    return ".pecsv"
+                if any(n.endswith(".csv") for n in names):
+                    return ".csv"
+                if names:
+                    return os.path.splitext(names[0])[1]
+        except Exception as e:
+            logger.warning(f"Unable to inspect ZIP archive '{file_path}': {e}")
+    return os.path.splitext(file_path)[1].lower()
+
+
 def extract_csv_columns(file_path: str) -> list[str]:
     """
-    Reads the header line (line 1) from a CSV file or archive (.zip, .gz)
+    Reads the header line (line 1) from a delimited text file or archive (.zip, .gz)
     and returns an ordered list of sanitized column names.
     Supports comma, semicolon, and tab delimiters.
     Streams directly from memory for archives without writing uncompressed files to disk.
+    Supports both .csv and .pecsv members inside archives.
     """
     first_line = ""
     lower_path = file_path.lower()
 
     if lower_path.endswith(".zip"):
         with zipfile.ZipFile(file_path, "r") as z:
-            csv_members = [n for n in z.namelist() if n.lower().endswith(".csv")]
-            if not csv_members:
-                raise ValueError(f"No CSV file found inside ZIP archive '{file_path}'.")
-            with z.open(csv_members[0], "r") as f:
+            delimited_members = [n for n in z.namelist() if n.lower().endswith((".csv", ".pecsv"))]
+            if not delimited_members:
+                raise ValueError(f"No CSV or PECSV file found inside ZIP archive '{file_path}'.")
+            with z.open(delimited_members[0], "r") as f:
                 first_line = io.TextIOWrapper(f, encoding="utf-8", errors="replace").readline().strip()
     elif lower_path.endswith(".gz"):
         with gzip.open(file_path, "rt", encoding="utf-8", errors="replace") as f:
@@ -80,7 +107,8 @@ def extract_csv_columns(file_path: str) -> list[str]:
 def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION") -> list[dict]:
     """
     Loads entity mapping rules for the specified source from entity_mapping.csv.
-    Returns a list of dicts: [{"target_table": ..., "signature": ..., "extension": ...}]
+    Supports INNER_EXTENSION column (e.g. .csv vs .pecsv).
+    Returns a list of dicts: [{"target_table": ..., "signature": ..., "extension": ..., "inner_extension": ...}]
     """
     rules = []
     with open(mapping_file, "r", encoding="utf-8") as f:
@@ -90,6 +118,9 @@ def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION"
             tgt = normalized.get("TARGET_TABLE", "")
             sig = normalized.get("FILE_SIGNATURE", "")
             ext = normalized.get("EXTENSION", ".csv")
+            inner_ext = normalized.get("INNER_EXTENSION", "").lower()
+            if not inner_ext:
+                inner_ext = ".csv"
             src = normalized.get("SOURCE", "")
 
             if tgt and sig:
@@ -98,23 +129,41 @@ def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION"
                     rules.append({
                         "target_table": tgt,
                         "signature": sig.lower(),
-                        "extension": ext.lower()
+                        "extension": ext.lower(),
+                        "inner_extension": inner_ext
                     })
 
     return rules
 
 
-def match_target_table_for_file(filename: str, mapping_rules: list[dict]) -> str | None:
+def match_target_table_for_file(filename: str, mapping_rules: list[dict], file_dir: str = None) -> str | None:
     """
     Matches a given data filename against loaded mapping rules to resolve the target staging table.
-    Supports single or comma-separated extensions (e.g. '.csv,.zip').
+    Supports single or comma-separated extensions (e.g. '.csv,.zip') and differentiates
+    payload (.csv) vs active keys (.pecsv) via inner_extension inspection.
     """
     fn_lower = filename.lower()
+    full_path = os.path.join(file_dir, filename) if file_dir else filename
+    inner_ext = inspect_file_inner_extension(full_path)
+
+    # 1. Exact match with signature, outer extension, and inner_extension
     for rule in mapping_rules:
         if rule["signature"] in fn_lower:
             ext = rule["extension"]
-            if not ext or ext == "*" or fn_lower.endswith(ext) or any(fn_lower.endswith(e.strip()) for e in ext.split(",")):
+            ext_match = not ext or ext == "*" or fn_lower.endswith(ext) or any(fn_lower.endswith(e.strip()) for e in ext.split(","))
+            if ext_match:
+                rule_inner = rule.get("inner_extension")
+                if rule_inner and rule_inner == inner_ext:
+                    return rule["target_table"]
+
+    # 2. Fallback match without inner_extension (backward compatibility)
+    for rule in mapping_rules:
+        if rule["signature"] in fn_lower:
+            ext = rule["extension"]
+            ext_match = not ext or ext == "*" or fn_lower.endswith(ext) or any(fn_lower.endswith(e.strip()) for e in ext.split(","))
+            if ext_match:
                 return rule["target_table"]
+
     return None
 
 
@@ -205,7 +254,7 @@ def recreate_staging_table(connection, target_db: str, target_table: str, column
 
 def sync_entity_schema_if_drifted(connection, target_db: str, target_table: str, sample_file_path: str, default_type: str = "VARCHAR(4000)") -> tuple[bool, str, list[str]]:
     """
-    Compares CSV header columns in sample_file_path with the Teradata staging table.
+    Compares CSV/PECSV header columns in sample_file_path with the Teradata staging table.
     If the table does not exist or columns have drifted:
       Recreates the table using generate_staging_ddl.
     Returns:

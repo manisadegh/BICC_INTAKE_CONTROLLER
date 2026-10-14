@@ -259,7 +259,7 @@ def main():
             file_to_table = {}
 
             for fname in declared_files:
-                target_table = match_target_table_for_file(fname, mapping_rules)
+                target_table = match_target_table_for_file(fname, mapping_rules, file_dir=drop_zone)
                 if not target_table:
                     logger.critical(f"FATAL: File '{fname}' does not match any recognized entity in '{mapping_file}'.")
                     sys.exit(1)

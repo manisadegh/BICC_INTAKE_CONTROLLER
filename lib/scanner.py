@@ -2,24 +2,43 @@
 lib/scanner.py - Drop Zone Scanner & Payload Stability Sentry
 
 Discovers raw manifests deposited in DROP_ZONE, parses batch metadata,
+resolves batch IDs from payload filenames when omitted from manifest names,
 sorts execution queues in strict ascending chronological order (FIFO),
 and validates file existence and upload stability.
 """
 
+import logging
 import os
 import re
 import time
-import logging
 from datetime import datetime
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
 # Precompiled patterns for standard and legacy manifest naming conventions
 MANIFEST_PATTERNS = [
+    # 1. Standard: MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF
     re.compile(r"^MANIFEST[-_]([A-Za-z0-9_]+)[-_](\d{8}_\d{6})[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE),
+    # 2. Oracle BICC with Timestamp: *MANIFEST-YYYYMMDD_HHMMSS.MF (e.g. DT2_MANIFEST-20261013_131116.MF)
+    re.compile(r"^.*MANIFEST[-_](\d{8}_\d{6})\.MF$", re.IGNORECASE),
+    # 3. Legacy BICC raw: MANIFEST-batch<ID>-.MF
     re.compile(r"^MANIFEST[-_]batch([A-Za-z0-9_-]+)[-_]\.MF$", re.IGNORECASE),
+    # 4. Single-token manifest: MANIFEST_<TOKEN>.MF
     re.compile(r"^MANIFEST[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE)
 ]
+
+
+def extract_batch_id_from_filenames(declared_files: list[str]) -> str | None:
+    """
+    Extracts batch_id from declared filenames following the pattern:
+      *<signature>-batch<batch_id>-YYYYMMDD_HHMMSS.zip/.csv
+      e.g. DT2_file_..._invoiceheaderextractpvo-batch847376139-20261013_131116.zip -> 847376139
+    """
+    for fname in declared_files:
+        m = re.search(r"-batch([A-Za-z0-9_-]+?)-", fname, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
 
 
 def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION") -> dict:
@@ -42,40 +61,61 @@ def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION"
             "source": source,
             "extract_timestamp": extract_ts_raw,
             "batch_id": batch_id,
-            "sort_key": sort_key
+            "sort_key": sort_key,
+            "batch_id_from_manifest": True
         }
 
-    # 2. Legacy BICC raw: MANIFEST-batch<ID>-.MF
+    # 2. Oracle BICC with Timestamp: *MANIFEST-YYYYMMDD_HHMMSS.MF (e.g. DT2_MANIFEST-20261013_131116.MF)
     m2 = MANIFEST_PATTERNS[1].match(filename)
     if m2:
-        batch_id = m2.group(1)
+        extract_ts_raw = m2.group(1)
+        try:
+            dt = datetime.strptime(extract_ts_raw, "%Y%m%d_%H%M%S")
+            ts_float = dt.timestamp()
+        except ValueError:
+            ts_float = 0.0
+        return {
+            "source": default_source,
+            "extract_timestamp": extract_ts_raw,
+            "batch_id": extract_ts_raw,  # Temporary placeholder; will be overridden by payload batch ID
+            "sort_key": (ts_float, extract_ts_raw),
+            "batch_id_from_manifest": False
+        }
+
+    # 3. Legacy BICC raw: MANIFEST-batch<ID>-.MF
+    m3 = MANIFEST_PATTERNS[2].match(filename)
+    if m3:
+        batch_id = m3.group(1)
         sort_key_val = int(batch_id) if batch_id.isdigit() else batch_id
         return {
             "source": default_source,
             "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
             "batch_id": batch_id,
-            "sort_key": (0.0, sort_key_val)
+            "sort_key": (0.0, sort_key_val),
+            "batch_id_from_manifest": True
         }
 
-    # 3. Single-token manifest: MANIFEST_<TOKEN>.MF
-    m3 = MANIFEST_PATTERNS[2].match(filename)
-    if m3:
-        token = m3.group(1)
+    # 4. Single-token manifest: MANIFEST_<TOKEN>.MF
+    m4 = MANIFEST_PATTERNS[3].match(filename)
+    if m4:
+        token = m4.group(1)
         sort_key_val = int(token) if token.isdigit() else token
         return {
             "source": default_source,
             "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
             "batch_id": token,
-            "sort_key": (0.0, sort_key_val)
+            "sort_key": (0.0, sort_key_val),
+            "batch_id_from_manifest": True
         }
 
-    # 4. Fallback generic naming
+    # 5. Fallback generic naming
     base = os.path.splitext(filename)[0]
     return {
         "source": default_source,
         "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         "batch_id": base,
-        "sort_key": (0.0, base)
+        "sort_key": (0.0, base),
+        "batch_id_from_manifest": False
     }
 
 
@@ -115,6 +155,7 @@ def read_declared_files_from_manifest(manifest_path: str) -> list[str]:
 def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> list[dict]:
     """
     Scans the drop zone for all valid manifest files (.MF).
+    Resolves true batch_id from declared payload files if omitted from manifest name.
     Returns a list of parsed batch descriptor dictionaries.
     """
     if not os.path.exists(drop_zone_dir):
@@ -132,7 +173,13 @@ def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") ->
                 logger.error(f"Failed to read manifest '{f}': {e}")
                 continue
 
-            # If extract timestamp was generated from fallback, refine using file mtime
+            # Resolve true batch_id from declared payload filenames (e.g. -batch<id>-)
+            payload_batch_id = extract_batch_id_from_filenames(declared_files)
+            if payload_batch_id:
+                meta["batch_id"] = payload_batch_id
+                meta["sort_key"] = (meta["sort_key"][0], payload_batch_id)
+
+            # If extract timestamp was generated from fallback (sort_key[0] == 0.0), refine using file mtime
             mtime = os.path.getmtime(full_path)
             if meta["sort_key"][0] == 0.0:
                 dt_mtime = datetime.fromtimestamp(mtime)
