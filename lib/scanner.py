@@ -1,3 +1,11 @@
+"""
+lib/scanner.py - Drop Zone Scanner & Payload Stability Sentry
+
+Discovers raw manifests deposited in DROP_ZONE, parses batch metadata,
+sorts execution queues in strict ascending chronological order (FIFO),
+and validates file existence and upload stability.
+"""
+
 import os
 import re
 import time
@@ -6,24 +14,21 @@ from datetime import datetime
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
-# Regex to detect standardized or legacy manifests
-# Matches:
-#   MANIFEST_ORACLE_FUSION_20261012_120000_1003.MF
-#   MANIFEST-batch401-.MF
-#   MANIFEST_FUSION_20261012_101.MF
-#   MANIFEST_1001.MF
-MANIFEST_REGEXES = [
+# Precompiled patterns for standard and legacy manifest naming conventions
+MANIFEST_PATTERNS = [
     re.compile(r"^MANIFEST[-_]([A-Za-z0-9_]+)[-_](\d{8}_\d{6})[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE),
     re.compile(r"^MANIFEST[-_]batch([A-Za-z0-9_-]+)[-_]\.MF$", re.IGNORECASE),
     re.compile(r"^MANIFEST[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE)
 ]
 
-def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
+
+def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION") -> dict:
     """
     Parses manifest filename to extract source, extract_timestamp, and batch_id.
-    Generates a deterministic sort_key for FIFO ordering.
+    Constructs a deterministic sort_key for chronological FIFO ordering.
     """
-    m1 = MANIFEST_REGEXES[0].match(filename)
+    # 1. Standard: MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF
+    m1 = MANIFEST_PATTERNS[0].match(filename)
     if m1:
         source = m1.group(1).upper()
         extract_ts_raw = m1.group(2)
@@ -31,7 +36,7 @@ def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
         try:
             dt = datetime.strptime(extract_ts_raw, "%Y%m%d_%H%M%S")
             sort_key = (dt.timestamp(), batch_id)
-        except Exception:
+        except ValueError:
             sort_key = (0.0, batch_id)
         return {
             "source": source,
@@ -40,7 +45,8 @@ def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
             "sort_key": sort_key
         }
 
-    m2 = MANIFEST_REGEXES[1].match(filename)
+    # 2. Legacy BICC raw: MANIFEST-batch<ID>-.MF
+    m2 = MANIFEST_PATTERNS[1].match(filename)
     if m2:
         batch_id = m2.group(1)
         sort_key_val = int(batch_id) if batch_id.isdigit() else batch_id
@@ -51,7 +57,8 @@ def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
             "sort_key": (0.0, sort_key_val)
         }
 
-    m3 = MANIFEST_REGEXES[2].match(filename)
+    # 3. Single-token manifest: MANIFEST_<TOKEN>.MF
+    m3 = MANIFEST_PATTERNS[2].match(filename)
     if m3:
         token = m3.group(1)
         sort_key_val = int(token) if token.isdigit() else token
@@ -62,7 +69,7 @@ def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
             "sort_key": (0.0, sort_key_val)
         }
 
-    # Generic fallback
+    # 4. Fallback generic naming
     base = os.path.splitext(filename)[0]
     return {
         "source": default_source,
@@ -71,49 +78,52 @@ def parse_manifest_filename(filename, default_source="ORACLE_FUSION"):
         "sort_key": (0.0, base)
     }
 
-def read_declared_files_from_manifest(manifest_path):
+
+def read_declared_files_from_manifest(manifest_path: str) -> list[str]:
     """
     Reads data file names declared inside the manifest file.
     Supports CSV headers (filename,checksum) or raw lists of filenames.
+    Ignores blank lines, comments, and key-value lines.
     """
     declared = []
-    with open(manifest_path, 'r', encoding='utf-8') as f:
+    with open(manifest_path, "r", encoding="utf-8") as f:
         for line in f:
             line_str = line.strip()
-            if not line_str or line_str.startswith('#') or '=' in line_str:
+            if not line_str or line_str.startswith("#") or "=" in line_str:
                 continue
-            
-            # Split if CSV/tab/semicolon
-            if ';' in line_str:
-                parts = line_str.split(';')
-            elif '\t' in line_str:
-                parts = line_str.split('\t')
-            elif ',' in line_str:
-                parts = line_str.split(',')
+
+            # Parse delimiter: semicolon, tab, or comma
+            if ";" in line_str:
+                parts = line_str.split(";")
+            elif "\t" in line_str:
+                parts = line_str.split("\t")
+            elif "," in line_str:
+                parts = line_str.split(",")
             else:
                 parts = [line_str]
 
             token = parts[0].strip().strip('"').strip("'")
             if token.lower() in ("filename", "file_name", "file"):
                 continue  # Header line
-            
+
             if token:
                 declared.append(token)
-                
+
     return declared
 
-def scan_drop_zone(drop_zone_dir, default_source="ORACLE_FUSION"):
+
+def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> list[dict]:
     """
-    Scans the drop zone for all valid manifest files.
-    Returns a list of parsed manifest dictionary objects.
+    Scans the drop zone for all valid manifest files (.MF).
+    Returns a list of parsed batch descriptor dictionaries.
     """
     if not os.path.exists(drop_zone_dir):
-        logger.warning(f"Drop zone directory does not exist: {drop_zone_dir}")
+        logger.warning(f"Drop zone directory does not exist: '{drop_zone_dir}'")
         return []
 
     manifests = []
     for f in os.listdir(drop_zone_dir):
-        if f.upper().endswith('.MF') and not f.startswith('.'):
+        if f.upper().endswith(".MF") and not f.startswith("."):
             full_path = os.path.join(drop_zone_dir, f)
             meta = parse_manifest_filename(f, default_source)
             try:
@@ -122,7 +132,7 @@ def scan_drop_zone(drop_zone_dir, default_source="ORACLE_FUSION"):
                 logger.error(f"Failed to read manifest '{f}': {e}")
                 continue
 
-            # If extract timestamp was generated from fallback, try to refine from file mtime
+            # If extract timestamp was generated from fallback, refine using file mtime
             mtime = os.path.getmtime(full_path)
             if meta["sort_key"][0] == 0.0:
                 dt_mtime = datetime.fromtimestamp(mtime)
@@ -141,16 +151,18 @@ def scan_drop_zone(drop_zone_dir, default_source="ORACLE_FUSION"):
 
     return manifests
 
-def sort_batches_fifo(batches):
+
+def sort_batches_fifo(batches: list[dict]) -> list[dict]:
     """
     Sorts batches in strict ascending chronological order (FIFO - oldest first).
     """
     return sorted(batches, key=lambda b: b["sort_key"])
 
-def verify_payload_stability(drop_zone_dir, declared_files, settling_window_sec=5):
+
+def verify_payload_stability(drop_zone_dir: str, declared_files: list[str], settling_window_sec: int = 5) -> tuple[bool, str]:
     """
     Verifies that all files declared in the manifest exist in DROP_ZONE,
-    are non-empty (>0 bytes), and are stable (sizes not changing during settling window).
+    are non-empty (>0 bytes), and remain stable (unmodified) during the settling window.
     """
     missing_files = []
     zero_byte_files = []

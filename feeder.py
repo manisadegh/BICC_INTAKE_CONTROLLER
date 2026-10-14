@@ -1,21 +1,42 @@
-import os
-import sys
+"""
+feeder.py - BICC Intake Controller & Auto-DDL Supervisor
+
+Master entrypoint for processing asynchronous multi-batch Oracle Fusion Cloud BICC
+exports. Enforces strict FIFO chronological ordering, upload settling validation,
+in-memory schema drift detection against DBC.ColumnsV, automated NOPI VARCHAR(4000)
+table creation, cryptographic manifest standardizing, raw manifest vaulting, and
+delegation to DATA_INGESTION_ORCHESTRATOR under strict FAIL_STOP semantics.
+"""
+
+import argparse
 import json
 import logging
-import argparse
+import os
+import sys
 from datetime import datetime
 import teradatasql
 
-# Import local modules
+# Ensure local lib/ modules are importable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 from lib.scanner import scan_drop_zone, sort_batches_fifo, verify_payload_stability
-from lib.schema_guard import load_entity_mappings, match_target_table_for_file, sync_entity_schema_if_drifted
-from lib.manifest_factory import compute_file_md5, create_standardized_manifest, vault_raw_manifest, transfer_batch_to_landing_zone
+from lib.schema_guard import (
+    load_entity_mappings,
+    match_target_table_for_file,
+    sync_entity_schema_if_drifted
+)
+from lib.manifest_factory import (
+    compute_file_md5,
+    create_standardized_manifest,
+    vault_raw_manifest,
+    transfer_batch_to_landing_zone
+)
 from lib.orchestrator_bridge import invoke_orchestrator
 
-def setup_logger(logs_dir):
+
+def setup_logger(logs_dir: str) -> logging.Logger:
     """
     Sets up dual stream and dedicated file logging in logs_dir:
       logs/feeder_<YYYYMMDD_HHMMSS>.log
@@ -40,7 +61,7 @@ def setup_logger(logs_dir):
     logger.addHandler(ch)
 
     # File Handler
-    fh = logging.FileHandler(log_file, encoding='utf-8')
+    fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(formatter)
     logger.addHandler(fh)
@@ -48,7 +69,8 @@ def setup_logger(logs_dir):
     logger.info(f"Initialized BICC Intake Controller log file: '{log_file}'")
     return logger
 
-def get_teradata_connection(td_cfg):
+
+def get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection:
     """
     Establishes connection to Teradata Vantage.
     Supports config keys ('host', 'server', 'tdpid'), environment variables (TDPID, TDENV, SID_ADM_USER),
@@ -59,7 +81,7 @@ def get_teradata_connection(td_cfg):
 
     host = td_cfg.get("host") or td_cfg.get("server") or td_cfg.get("tdpid") or os.environ.get("TDPID")
     if not host:
-        raise ValueError("Teradata host/server not configured. Provide 'host' (or 'server') in config.json or export TDPID.")
+        raise ValueError("Teradata host/server not configured. Provide 'host' in config.json or export TDPID.")
 
     env_user = f"{os.environ.get('TDENV', '')}{os.environ.get('SID_ADM_USER', '')}" if os.environ.get("SID_ADM_USER") else os.environ.get("USER")
     user = td_cfg.get("user") or td_cfg.get("username") or env_user
@@ -71,11 +93,9 @@ def get_teradata_connection(td_cfg):
         "user": user,
         "logmech": td_cfg.get("logmech", "TD2")
     }
-    
+
     # 1. Direct key_file and pass_file configuration
     if "key_file" in td_cfg and "pass_file" in td_cfg:
-        kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
-    elif "pass_file" in td_cfg and "key_file" in td_cfg:
         kwargs["password"] = f"ENCRYPTED_PASSWORD(file:{td_cfg['key_file']},file:{td_cfg['pass_file']})"
     elif "password" in td_cfg and td_cfg["password"]:
         kwargs["password"] = td_cfg["password"]
@@ -91,23 +111,25 @@ def get_teradata_connection(td_cfg):
 
     return teradatasql.connect(**kwargs)
 
-def select_header_chunk_file(file_list):
+
+def select_header_chunk_file(file_list: list[str]) -> str:
     """
-    Among a list of chunk files for an entity, returns the file that contains the header.
-    In BICC multi-chunk conventions, part1.csv or the first alphabetical chunk has the header.
+    Among a list of chunk files for an entity, returns the file containing the header.
+    In BICC multi-chunk conventions, part1.csv or the first alphabetical chunk contains line 1 header.
     """
-    sorted_files = sorted(file_list)
-    return sorted_files[0]
+    return sorted(file_list)[0]
+
 
 def expand_env_vars(data):
     """Recursively expands ${VAR} or $VAR environment variables in configuration strings."""
     if isinstance(data, str):
         return os.path.expandvars(data)
-    elif isinstance(data, dict):
+    if isinstance(data, dict):
         return {k: expand_env_vars(v) for k, v in data.items()}
-    elif isinstance(data, list):
+    if isinstance(data, list):
         return [expand_env_vars(v) for v in data]
     return data
+
 
 def main():
     parser = argparse.ArgumentParser(description="BICC Intake Controller - Over-Arching Oracle Fusion Feeder")
@@ -176,7 +198,7 @@ def main():
     # 2.5 Check for In-Flight Batch in LOADING_ZONE (Crash Recovery)
     loading_zone = os.path.normpath(os.path.join(landing_zone, "../LOADING_ZONE")) if landing_zone else None
     if loading_zone and os.path.exists(loading_zone):
-        in_flight_mf = [f for f in os.listdir(loading_zone) if f.endswith('.MF')]
+        in_flight_mf = [f for f in os.listdir(loading_zone) if f.upper().endswith(".MF")]
         if in_flight_mf:
             logger.info(f"In-flight batch detected in LOADING_ZONE ({in_flight_mf[0]}). Resuming Orchestrator delegation...")
             rc = invoke_orchestrator(orch_dir, orch_config, python_bin)
@@ -205,131 +227,138 @@ def main():
         logger.critical(f"FATAL: Database connection failed: {e}")
         sys.exit(1)
 
-    # Load entity mapping rules
-    if not os.path.exists(mapping_file):
-        logger.critical(f"FATAL: Entity mapping file not found at: '{mapping_file}'")
-        sys.exit(1)
-    mapping_rules = load_entity_mappings(mapping_file, filter_source=default_source)
-    logger.info(f"Loaded {len(mapping_rules)} entity mapping rules for source '{default_source}'.")
-
-    # 6. Process Queue in FIFO Order
-    for batch_idx, batch_info in enumerate(fifo_queue, 1):
-        batch_id = batch_info["batch_id"]
-        source = batch_info["source"]
-        extract_ts = batch_info["extract_timestamp"]
-        raw_manifest_path = batch_info["manifest_path"]
-        declared_files = batch_info["declared_files"]
-
-        logger.info("-" * 70)
-        logger.info(f"PROCESSING BATCH {batch_idx}/{len(fifo_queue)}: ID={batch_id} (Source={source}, TS={extract_ts})")
-        logger.info("-" * 70)
-
-        # 6.1 Stability Sentry
-        stable, reason = verify_payload_stability(drop_zone, declared_files, settling_sec)
-        if not stable:
-            logger.critical(f"Payload stability check failed for batch {batch_id}: {reason}")
-            logger.critical("Halting pipeline under FAIL_STOP policy to prevent corrupt ingestion.")
+    try:
+        # Load entity mapping rules
+        if not os.path.exists(mapping_file):
+            logger.critical(f"FATAL: Entity mapping file not found at: '{mapping_file}'")
             sys.exit(1)
+        mapping_rules = load_entity_mappings(mapping_file, filter_source=default_source)
+        logger.info(f"Loaded {len(mapping_rules)} entity mapping rules for source '{default_source}'.")
 
-        # 6.2 Group files by target entity and inspect schemas
-        entity_groups = {}  # {TARGET_TABLE: [file1, file2]}
-        receipt_files = []
+        # 6. Process Queue in FIFO Order
+        for batch_idx, batch_info in enumerate(fifo_queue, 1):
+            batch_id = batch_info["batch_id"]
+            source = batch_info["source"]
+            extract_ts = batch_info["extract_timestamp"]
+            raw_manifest_path = batch_info["manifest_path"]
+            declared_files = batch_info["declared_files"]
 
-        for fname in declared_files:
-            target_table = match_target_table_for_file(fname, mapping_rules)
-            if not target_table:
-                logger.critical(f"FATAL: File '{fname}' does not match any recognized entity in '{mapping_file}'.")
-                sys.exit(1)
-            if target_table not in entity_groups:
-                entity_groups[target_table] = []
-            entity_groups[target_table].append(fname)
+            logger.info("-" * 70)
+            logger.info(f"PROCESSING BATCH {batch_idx}/{len(fifo_queue)}: ID={batch_id} (Source={source}, TS={extract_ts})")
+            logger.info("-" * 70)
 
-        logger.info(f"Batch {batch_id} targets {len(entity_groups)} distinct staging table(s): {list(entity_groups.keys())}")
-
-        # 6.3 Auto-DDL Schema Synchronization
-        schema_statuses = {}
-        for target_table, files in entity_groups.items():
-            header_file = select_header_chunk_file(files)
-            header_full_path = os.path.join(drop_zone, header_file)
-            
-            try:
-                is_identical, action, cols = sync_entity_schema_if_drifted(
-                    connection=db_conn,
-                    target_db=target_db,
-                    target_table=target_table,
-                    sample_file_path=header_full_path,
-                    default_type=schema_cfg.get("default_column_type", "VARCHAR(4000)")
-                )
-                schema_statuses[target_table] = action
-            except Exception as e:
-                logger.critical(f"FATAL: Schema synchronization failed for {target_table}: {e}")
+            # 6.1 Stability Sentry
+            stable, reason = verify_payload_stability(drop_zone, declared_files, settling_sec)
+            if not stable:
+                logger.critical(f"Payload stability check failed for batch {batch_id}: {reason}")
+                logger.critical("Halting pipeline under FAIL_STOP policy to prevent corrupt ingestion.")
                 sys.exit(1)
 
-        # 6.4 Compute MD5 Checksums for all data files
-        file_checksum_pairs = []
-        for fname in declared_files:
-            fpath = os.path.join(drop_zone, fname)
-            md5_hash = compute_file_md5(fpath)
-            file_checksum_pairs.append((fname, md5_hash))
-            receipt_files.append({
-                "filename": fname,
-                "filesize_bytes": os.path.getsize(fpath),
-                "md5": md5_hash,
-                "target_table": match_target_table_for_file(fname, mapping_rules),
-                "schema_action": schema_statuses.get(match_target_table_for_file(fname, mapping_rules), "UNKNOWN")
-            })
+            # 6.2 Group files by target entity and inspect schemas
+            entity_groups = {}
+            file_to_table = {}
 
-        # 6.5 Vault Raw BICC Manifest + Intake Receipt
-        vault_raw_manifest(
-            raw_manifest_path=raw_manifest_path,
-            archive_base_dir=raw_archive,
-            source=source,
-            extract_timestamp=extract_ts,
-            batch_id=batch_id,
-            receipt_payload=receipt_files
-        )
+            for fname in declared_files:
+                target_table = match_target_table_for_file(fname, mapping_rules)
+                if not target_table:
+                    logger.critical(f"FATAL: File '{fname}' does not match any recognized entity in '{mapping_file}'.")
+                    sys.exit(1)
+                file_to_table[fname] = target_table
+                entity_groups.setdefault(target_table, []).append(fname)
 
-        # 6.6 Synthesize Standardized Manifest in Orchestrator's LANDING_ZONE
-        target_landing_zone = landing_zone or os.path.join(orch_dir, "../LANDING_ZONE")
-        create_standardized_manifest(
-            output_dir=target_landing_zone,
-            source=source,
-            extract_timestamp=extract_ts,
-            batch_id=batch_id,
-            file_checksum_pairs=file_checksum_pairs
-        )
+            logger.info(f"Batch {batch_id} targets {len(entity_groups)} distinct staging table(s): {list(entity_groups.keys())}")
 
-        # 6.7 Transfer Data Files to LANDING_ZONE
-        transfer_batch_to_landing_zone(
-            drop_zone_dir=drop_zone,
-            landing_zone_dir=target_landing_zone,
-            data_files=declared_files
-        )
+            # 6.3 Auto-DDL Schema Synchronization
+            schema_statuses = {}
+            for target_table, files in entity_groups.items():
+                header_file = select_header_chunk_file(files)
+                header_full_path = os.path.join(drop_zone, header_file)
 
-        # 6.8 Launch Orchestrator and Enforce Barrier
-        logger.info(f"Delegating execution of batch {batch_id} to DATA_INGESTION_ORCHESTRATOR...")
-        orch_rc = invoke_orchestrator(
-            orchestrator_dir=orch_dir,
-            config_file=orch_config,
-            python_bin=python_bin
-        )
+                try:
+                    _, action, _ = sync_entity_schema_if_drifted(
+                        connection=db_conn,
+                        target_db=target_db,
+                        target_table=target_table,
+                        sample_file_path=header_full_path,
+                        default_type=schema_cfg.get("default_column_type", "VARCHAR(4000)")
+                    )
+                    schema_statuses[target_table] = action
+                except Exception as e:
+                    logger.critical(f"FATAL: Schema synchronization failed for {target_table}: {e}")
+                    sys.exit(1)
 
-        # 6.9 Evaluate Outcome (FAIL_STOP)
-        if orch_rc != 0:
-            logger.critical(f"FATAL: DATA_INGESTION_ORCHESTRATOR failed with exit code {orch_rc} on Batch {batch_id}!")
-            logger.critical("Applying FAIL_STOP policy: Halting feeder immediately to preserve data lineage.")
+            # 6.4 Compute MD5 Checksums for all data files
+            file_checksum_pairs = []
+            receipt_files = []
+            for fname in declared_files:
+                fpath = os.path.join(drop_zone, fname)
+                md5_hash = compute_file_md5(fpath)
+                file_checksum_pairs.append((fname, md5_hash))
+                tbl = file_to_table[fname]
+                receipt_files.append({
+                    "filename": fname,
+                    "filesize_bytes": os.path.getsize(fpath),
+                    "md5": md5_hash,
+                    "target_table": tbl,
+                    "schema_action": schema_statuses.get(tbl, "UNKNOWN")
+                })
+
+            # 6.5 Vault Raw BICC Manifest + Intake Receipt
+            vault_raw_manifest(
+                raw_manifest_path=raw_manifest_path,
+                archive_base_dir=raw_archive,
+                source=source,
+                extract_timestamp=extract_ts,
+                batch_id=batch_id,
+                receipt_payload=receipt_files
+            )
+
+            # 6.6 Synthesize Standardized Manifest in Orchestrator's LANDING_ZONE
+            target_landing_zone = landing_zone or os.path.join(orch_dir, "../LANDING_ZONE")
+            create_standardized_manifest(
+                output_dir=target_landing_zone,
+                source=source,
+                extract_timestamp=extract_ts,
+                batch_id=batch_id,
+                file_checksum_pairs=file_checksum_pairs
+            )
+
+            # 6.7 Transfer Data Files to LANDING_ZONE
+            transfer_batch_to_landing_zone(
+                drop_zone_dir=drop_zone,
+                landing_zone_dir=target_landing_zone,
+                data_files=declared_files
+            )
+
+            # 6.8 Launch Orchestrator and Enforce Barrier
+            logger.info(f"Delegating execution of batch {batch_id} to DATA_INGESTION_ORCHESTRATOR...")
+            orch_rc = invoke_orchestrator(
+                orchestrator_dir=orch_dir,
+                config_file=orch_config,
+                python_bin=python_bin
+            )
+
+            # 6.9 Evaluate Outcome (FAIL_STOP)
+            if orch_rc != 0:
+                logger.critical(f"FATAL: DATA_INGESTION_ORCHESTRATOR failed with exit code {orch_rc} on Batch {batch_id}!")
+                logger.critical("Applying FAIL_STOP policy: Halting feeder immediately to preserve data lineage.")
+                sys.exit(1)
+
+            logger.info(f"[SUCCESS] Batch {batch_id} ingested, verified and transformed successfully.")
+
+        # 7. Final Wrap-up
+        logger.info("=" * 70)
+        logger.info(f"ALL {len(fifo_queue)} BATCHES PROCESSED WITH 100% SUCCESS!")
+        logger.info("BICC INTAKE CONTROLLER TERMINATING NORMALLY (RC 0).")
+        logger.info("=" * 70)
+        sys.exit(0)
+
+    finally:
+        try:
             db_conn.close()
-            sys.exit(1)
+        except Exception:
+            pass
 
-        logger.info(f"[SUCCESS] Batch {batch_id} ingested, verified and transformed successfully.")
-
-    # 7. Final Wrap-up
-    db_conn.close()
-    logger.info("=" * 70)
-    logger.info(f"ALL {len(fifo_queue)} BATCHES PROCESSED WITH 100% SUCCESS!")
-    logger.info("BICC INTAKE CONTROLLER TERMINATING NORMALLY (RC 0).")
-    logger.info("=" * 70)
-    sys.exit(0)
 
 if __name__ == "__main__":
     main()

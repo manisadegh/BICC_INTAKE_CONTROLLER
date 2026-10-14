@@ -212,7 +212,7 @@ ORACLE_FUSION,ERP_USER,userpvo,.csv
 
 Launch the supervisor controller:
 ```bash
-python feeder.py --config config.json
+python3 feeder.py --config config.json
 ```
 
 ### Automation via Crontab

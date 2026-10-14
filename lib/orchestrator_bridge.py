@@ -1,11 +1,25 @@
+"""
+lib/orchestrator_bridge.py - Subprocess Delegation & Real-Time Log Streamer
+
+Synchronously launches DATA_INGESTION_ORCHESTRATOR via subprocess,
+relays stdout/stderr streams in real time to the feeder logger,
+and returns the process exit code to enforce FAIL_STOP semantics.
+"""
+
+import logging
+import os
 import subprocess
 import sys
-import os
-import logging
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
-def invoke_orchestrator(orchestrator_dir, config_file="config.json", python_bin=None, env=None):
+
+def invoke_orchestrator(
+    orchestrator_dir: str,
+    config_file: str = "config.json",
+    python_bin: str = None,
+    env: dict = None
+) -> int:
     """
     Synchronously invokes DATA_INGESTION_ORCHESTRATOR via subprocess:
       <python_bin> orchestrator.py --config <config_file>
@@ -26,7 +40,7 @@ def invoke_orchestrator(orchestrator_dir, config_file="config.json", python_bin=
     if env:
         run_env.update(env)
 
-    # Launch subprocess with unbuffered output
+    # Launch subprocess with unbuffered line-streaming
     process = subprocess.Popen(
         cmd,
         cwd=orchestrator_dir,
@@ -38,12 +52,13 @@ def invoke_orchestrator(orchestrator_dir, config_file="config.json", python_bin=
         env=run_env
     )
 
-    for line in iter(process.stdout.readline, ''):
-        if line:
-            # Relay orchestrator logs with indentation
-            logger.info(f"[ORCHESTRATOR] {line.rstrip()}")
+    try:
+        for line in iter(process.stdout.readline, ""):
+            if line:
+                logger.info(f"[ORCHESTRATOR] {line.rstrip()}")
+    finally:
+        process.stdout.close()
 
-    process.stdout.close()
     rc = process.wait()
 
     if rc == 0:

@@ -1,23 +1,40 @@
-import os
+"""
+lib/manifest_factory.py - Manifest Factory, Vaulting & Ingress Transfer
+
+Computes cryptographic MD5 checksums, synthesizes orchestrator-compliant manifests,
+vaults original raw BICC manifests with JSON audit receipts, and transfers
+payload batches to the Orchestrator's LANDING_ZONE.
+"""
+
 import hashlib
 import json
-import shutil
 import logging
+import os
+import shutil
 from datetime import datetime
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
-def compute_file_md5(file_path):
+
+def compute_file_md5(file_path: str) -> str:
     """
-    Computes cryptographic MD5 hash of a file reading in 64KB chunks.
+    Computes cryptographic MD5 hash of a file reading in 64 KB blocks.
+    Memory-efficient for multi-gigabyte extracts.
     """
     h = hashlib.md5()
-    with open(file_path, 'rb') as f:
+    with open(file_path, "rb") as f:
         while chunk := f.read(65536):
             h.update(chunk)
     return h.hexdigest().lower()
 
-def create_standardized_manifest(output_dir, source, extract_timestamp, batch_id, file_checksum_pairs):
+
+def create_standardized_manifest(
+    output_dir: str,
+    source: str,
+    extract_timestamp: str,
+    batch_id: str,
+    file_checksum_pairs: list[tuple[str, str]]
+) -> str:
     """
     Generates an orchestrator-compliant standardized manifest:
       MANIFEST_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.MF
@@ -34,18 +51,27 @@ def create_standardized_manifest(output_dir, source, extract_timestamp, batch_id
     for fname, cs in file_checksum_pairs:
         lines.append(f"{fname},{cs}\n")
 
-    with open(manifest_path, 'w', encoding='utf-8') as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
     logger.info(f"Created standardized manifest: '{manifest_path}' with {len(file_checksum_pairs)} file entries.")
     return manifest_path
 
-def vault_raw_manifest(raw_manifest_path, archive_base_dir, source, extract_timestamp, batch_id, receipt_payload):
+
+def vault_raw_manifest(
+    raw_manifest_path: str,
+    archive_base_dir: str,
+    source: str,
+    extract_timestamp: str,
+    batch_id: str,
+    receipt_payload: list[dict]
+) -> str:
     """
     Vaults the pristine original BICC manifest into:
       <archive_base_dir>/<EXTRACT_TIMESTAMP>_<BATCH_ID>/
     and writes an intake receipt audit file:
       <archive_base_dir>/<EXTRACT_TIMESTAMP>_<BATCH_ID>/intake_receipt.json
+    Returns the path of the vault directory.
     """
     vault_dir = os.path.join(archive_base_dir, f"{extract_timestamp}_{batch_id}")
     os.makedirs(vault_dir, exist_ok=True)
@@ -64,13 +90,19 @@ def vault_raw_manifest(raw_manifest_path, archive_base_dir, source, extract_time
         "payload": receipt_payload
     }
 
-    with open(receipt_file, 'w', encoding='utf-8') as f:
+    with open(receipt_file, "w", encoding="utf-8") as f:
         json.dump(receipt_data, f, indent=2)
 
     logger.info(f"Vaulted original manifest '{raw_basename}' and intake receipt to '{vault_dir}'.")
     return vault_dir
 
-def transfer_batch_to_landing_zone(drop_zone_dir, landing_zone_dir, data_files, standardized_manifest_path=None):
+
+def transfer_batch_to_landing_zone(
+    drop_zone_dir: str,
+    landing_zone_dir: str,
+    data_files: list[str],
+    standardized_manifest_path: str = None
+):
     """
     Moves data files (and standardized manifest if not already generated there)
     from DROP_ZONE to the Orchestrator's LANDING_ZONE.
