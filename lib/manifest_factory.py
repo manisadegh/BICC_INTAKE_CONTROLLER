@@ -28,7 +28,7 @@ def create_standardized_manifest(output_dir, source, extract_timestamp, batch_id
     """
     os.makedirs(output_dir, exist_ok=True)
     manifest_name = f"MANIFEST_{source}_{extract_timestamp}_{batch_id}.MF"
-    manifest_path = os.path.join(output_dir, manifest_name).replace('\\', '/')
+    manifest_path = os.path.join(output_dir, manifest_name)
 
     lines = ["filename,checksum\n"]
     for fname, cs in file_checksum_pairs:
@@ -47,14 +47,14 @@ def vault_raw_manifest(raw_manifest_path, archive_base_dir, source, extract_time
     and writes an intake receipt audit file:
       <archive_base_dir>/<EXTRACT_TIMESTAMP>_<BATCH_ID>/intake_receipt.json
     """
-    vault_dir = os.path.join(archive_base_dir, f"{extract_timestamp}_{batch_id}").replace('\\', '/')
+    vault_dir = os.path.join(archive_base_dir, f"{extract_timestamp}_{batch_id}")
     os.makedirs(vault_dir, exist_ok=True)
 
     raw_basename = os.path.basename(raw_manifest_path)
-    vault_manifest_path = os.path.join(vault_dir, raw_basename).replace('\\', '/')
+    vault_manifest_path = os.path.join(vault_dir, raw_basename)
     shutil.move(raw_manifest_path, vault_manifest_path)
 
-    receipt_file = os.path.join(vault_dir, "intake_receipt.json").replace('\\', '/')
+    receipt_file = os.path.join(vault_dir, "intake_receipt.json")
     receipt_data = {
         "batch_id": batch_id,
         "source": source,

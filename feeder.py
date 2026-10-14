@@ -22,7 +22,7 @@ def setup_logger(logs_dir):
     """
     os.makedirs(logs_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(logs_dir, f"feeder_{ts}.log").replace('\\', '/')
+    log_file = os.path.join(logs_dir, f"feeder_{ts}.log")
 
     logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
     logger.setLevel(logging.INFO)
@@ -99,6 +99,16 @@ def select_header_chunk_file(file_list):
     sorted_files = sorted(file_list)
     return sorted_files[0]
 
+def expand_env_vars(data):
+    """Recursively expands ${VAR} or $VAR environment variables in configuration strings."""
+    if isinstance(data, str):
+        return os.path.expandvars(data)
+    elif isinstance(data, dict):
+        return {k: expand_env_vars(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [expand_env_vars(v) for v in data]
+    return data
+
 def main():
     parser = argparse.ArgumentParser(description="BICC Intake Controller - Over-Arching Oracle Fusion Feeder")
     parser.add_argument("--config", type=str, required=True, help="Path to controller configuration JSON file")
@@ -109,8 +119,10 @@ def main():
         print(f"FATAL: Configuration file not found: {args.config}", file=sys.stderr)
         sys.exit(1)
 
+    base_dir = os.path.dirname(os.path.abspath(args.config))
+
     with open(args.config, "r", encoding="utf-8") as f:
-        config = json.load(f)
+        config = expand_env_vars(json.load(f))
 
     feeder_cfg = config.get("feeder", {})
     schema_cfg = config.get("schema_guard", {})
@@ -118,20 +130,39 @@ def main():
     td_cfg = config.get("teradata", {})
 
     drop_zone = feeder_cfg.get("drop_zone")
-    raw_archive = feeder_cfg.get("raw_manifest_archive", os.path.join(drop_zone, "archive"))
-    logs_dir = feeder_cfg.get("logs_dir", os.path.join(SCRIPT_DIR, "logs"))
+    if drop_zone and not os.path.isabs(drop_zone):
+        drop_zone = os.path.normpath(os.path.join(base_dir, drop_zone))
+
+    raw_archive = feeder_cfg.get("raw_manifest_archive")
+    if raw_archive and not os.path.isabs(raw_archive):
+        raw_archive = os.path.normpath(os.path.join(base_dir, raw_archive))
+    elif not raw_archive and drop_zone:
+        raw_archive = os.path.join(drop_zone, "archive")
+
+    logs_dir = feeder_cfg.get("logs_dir")
+    if logs_dir and not os.path.isabs(logs_dir):
+        logs_dir = os.path.normpath(os.path.join(base_dir, logs_dir))
+    elif not logs_dir:
+        logs_dir = os.path.join(SCRIPT_DIR, "logs")
+
     settling_sec = feeder_cfg.get("file_stability_window_seconds", 5)
     default_source = feeder_cfg.get("source_system_code", "ORACLE_FUSION")
 
-    target_db = schema_cfg.get("target_database", "globalmart_stg")
-    mapping_file = schema_cfg.get("entity_mapping_file", os.path.join(SCRIPT_DIR, "entity_mapping.csv"))
+    target_db = schema_cfg.get("target_database") or f"{os.environ.get('TDENV', '')}SIDFINSTG"
+    mapping_file = schema_cfg.get("entity_mapping_file", "entity_mapping.csv")
     if not os.path.isabs(mapping_file):
-        mapping_file = os.path.join(os.path.dirname(os.path.abspath(args.config)), mapping_file)
+        mapping_file = os.path.normpath(os.path.join(base_dir, mapping_file))
 
     orch_dir = orch_bridge_cfg.get("orchestrator_dir")
+    if orch_dir and not os.path.isabs(orch_dir):
+        orch_dir = os.path.normpath(os.path.join(base_dir, orch_dir))
+
     orch_config = orch_bridge_cfg.get("config_file", "config.json")
     landing_zone = orch_bridge_cfg.get("landing_zone")
-    python_bin = orch_bridge_cfg.get("python_executable", sys.executable)
+    if landing_zone and not os.path.isabs(landing_zone):
+        landing_zone = os.path.normpath(os.path.join(base_dir, landing_zone))
+
+    python_bin = orch_bridge_cfg.get("python_executable", "python3")
 
     # 2. Bootstrap Logger
     logger = setup_logger(logs_dir)
@@ -141,6 +172,18 @@ def main():
     logger.info(f"Drop Zone: {drop_zone}")
     logger.info(f"Target Database: {target_db}")
     logger.info(f"Orchestrator Directory: {orch_dir}")
+
+    # 2.5 Check for In-Flight Batch in LOADING_ZONE (Crash Recovery)
+    loading_zone = os.path.normpath(os.path.join(landing_zone, "../LOADING_ZONE")) if landing_zone else None
+    if loading_zone and os.path.exists(loading_zone):
+        in_flight_mf = [f for f in os.listdir(loading_zone) if f.endswith('.MF')]
+        if in_flight_mf:
+            logger.info(f"In-flight batch detected in LOADING_ZONE ({in_flight_mf[0]}). Resuming Orchestrator delegation...")
+            rc = invoke_orchestrator(orch_dir, orch_config, python_bin)
+            if rc != 0:
+                logger.critical("FATAL: In-flight batch recovery failed under FAIL_STOP policy.")
+                sys.exit(rc)
+            logger.info("In-flight batch completed and archived successfully.")
 
     # 3. Scan Drop Zone
     raw_manifests = scan_drop_zone(drop_zone, default_source)

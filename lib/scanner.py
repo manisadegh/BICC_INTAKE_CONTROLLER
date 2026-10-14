@@ -114,7 +114,7 @@ def scan_drop_zone(drop_zone_dir, default_source="ORACLE_FUSION"):
     manifests = []
     for f in os.listdir(drop_zone_dir):
         if f.upper().endswith('.MF') and not f.startswith('.'):
-            full_path = os.path.join(drop_zone_dir, f).replace('\\', '/')
+            full_path = os.path.join(drop_zone_dir, f)
             meta = parse_manifest_filename(f, default_source)
             try:
                 declared_files = read_declared_files_from_manifest(full_path)

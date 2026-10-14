@@ -174,7 +174,7 @@ Oracle Cloud quarterly updates may introduce new columns to BICC PVOs. The Schem
     "auto_migrate_ddl": true,
     "default_column_type": "VARCHAR(4000)",
     "character_set": "UNICODE",
-    "target_database": "globalmart_stg",
+    "target_database": "DEV0SIDFINSTG",
     "entity_mapping_file": "entity_mapping.csv"
   },
   "orchestrator": {

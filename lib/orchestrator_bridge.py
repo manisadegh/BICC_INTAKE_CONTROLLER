@@ -15,7 +15,7 @@ def invoke_orchestrator(orchestrator_dir, config_file="config.json", python_bin=
     if python_bin is None:
         python_bin = sys.executable
 
-    orch_script = os.path.join(orchestrator_dir, "orchestrator.py").replace('\\', '/')
+    orch_script = os.path.join(orchestrator_dir, "orchestrator.py")
     if not os.path.exists(orch_script):
         raise FileNotFoundError(f"orchestrator.py not found at: '{orch_script}'")
 
