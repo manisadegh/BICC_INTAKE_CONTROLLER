@@ -55,6 +55,12 @@ def inspect_file_inner_extension(file_path: str) -> str:
                     return os.path.splitext(names[0])[1]
         except Exception as e:
             logger.warning(f"Unable to inspect ZIP archive '{file_path}': {e}")
+    if lower_p.endswith(".gz"):
+        base = lower_p[:-3]
+        inner_ext = os.path.splitext(base)[1]
+        if inner_ext in (".csv", ".pecsv"):
+            return inner_ext
+        return ".csv"
     return os.path.splitext(file_path)[1].lower()
 
 
