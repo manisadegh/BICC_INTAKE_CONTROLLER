@@ -7,11 +7,14 @@ sorts execution queues in strict ascending chronological order (FIFO),
 and validates file existence and upload stability.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re
 import time
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -28,7 +31,7 @@ MANIFEST_PATTERNS = [
 ]
 
 
-def extract_batch_id_from_filenames(declared_files: list[str]) -> str | None:
+def extract_batch_id_from_filenames(declared_files: List[str]) -> Optional[str]:
     """
     Extracts batch_id from declared filenames following the pattern:
       *<signature>-batch<batch_id>-YYYYMMDD_HHMMSS.zip/.csv
@@ -41,7 +44,7 @@ def extract_batch_id_from_filenames(declared_files: list[str]) -> str | None:
     return None
 
 
-def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION") -> dict:
+def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION") -> Dict:
     """
     Parses manifest filename to extract source, extract_timestamp, and batch_id.
     Constructs a deterministic sort_key for chronological FIFO ordering.
@@ -119,7 +122,7 @@ def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION"
     }
 
 
-def read_declared_files_from_manifest(manifest_path: str) -> list[str]:
+def read_declared_files_from_manifest(manifest_path: str) -> List[str]:
     """
     Reads data file names declared inside the manifest file.
     Supports CSV headers (filename,checksum) or raw lists of filenames.
@@ -152,7 +155,7 @@ def read_declared_files_from_manifest(manifest_path: str) -> list[str]:
     return declared
 
 
-def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> list[dict]:
+def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> List[Dict]:
     """
     Scans the drop zone for all valid manifest files (.MF).
     Resolves true batch_id from declared payload files if omitted from manifest name.
@@ -199,14 +202,14 @@ def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") ->
     return manifests
 
 
-def sort_batches_fifo(batches: list[dict]) -> list[dict]:
+def sort_batches_fifo(batches: List[Dict]) -> List[Dict]:
     """
     Sorts batches in strict ascending chronological order (FIFO - oldest first).
     """
     return sorted(batches, key=lambda b: b["sort_key"])
 
 
-def verify_payload_stability(drop_zone_dir: str, declared_files: list[str], settling_window_sec: int = 5) -> tuple[bool, str]:
+def verify_payload_stability(drop_zone_dir: str, declared_files: List[str], settling_window_sec: int = 5) -> Tuple[bool, str]:
     """
     Verifies that all files declared in the manifest exist in DROP_ZONE,
     are non-empty (>0 bytes), and remain stable (unmodified) during the settling window.

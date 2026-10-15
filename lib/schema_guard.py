@@ -6,6 +6,8 @@ Performs in-memory header inspection (including streaming from .zip archives for
 and automatically generates and executes NOPI VARCHAR(4000) table recreation upon schema drift.
 """
 
+from __future__ import annotations
+
 import csv
 import gzip
 import io
@@ -13,6 +15,7 @@ import logging
 import os
 import re
 import zipfile
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -64,7 +67,7 @@ def inspect_file_inner_extension(file_path: str) -> str:
     return os.path.splitext(file_path)[1].lower()
 
 
-def extract_csv_columns(file_path: str) -> list[str]:
+def extract_csv_columns(file_path: str) -> List[str]:
     """
     Reads the header line (line 1) from a delimited text file or archive (.zip, .gz)
     and returns an ordered list of sanitized column names.
@@ -110,7 +113,7 @@ def extract_csv_columns(file_path: str) -> list[str]:
     return clean_cols
 
 
-def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION") -> list[dict]:
+def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION") -> List[Dict]:
     """
     Loads entity mapping rules for the specified source from entity_mapping.csv.
     Supports INNER_EXTENSION column (e.g. .csv vs .pecsv).
@@ -142,7 +145,7 @@ def load_entity_mappings(mapping_file: str, filter_source: str = "ORACLE_FUSION"
     return rules
 
 
-def match_target_table_for_file(filename: str, mapping_rules: list[dict], file_dir: str = None) -> str | None:
+def match_target_table_for_file(filename: str, mapping_rules: List[Dict], file_dir: str = None) -> Optional[str]:
     """
     Matches a given data filename against loaded mapping rules to resolve the target staging table.
     Supports single or comma-separated extensions (e.g. '.csv,.zip') and differentiates
@@ -173,7 +176,7 @@ def match_target_table_for_file(filename: str, mapping_rules: list[dict], file_d
     return None
 
 
-def get_teradata_table_columns(connection, target_db: str, target_table: str) -> list[str] | None:
+def get_teradata_table_columns(connection, target_db: str, target_table: str) -> Optional[List[str]]:
     """
     Queries DBC.ColumnsV for existing columns in the target table.
     Returns an ordered list of uppercase column names, excluding technical audit columns.
@@ -207,7 +210,7 @@ def get_teradata_table_columns(connection, target_db: str, target_table: str) ->
         cursor.close()
 
 
-def generate_staging_ddl(target_db: str, target_table: str, columns: list[str], default_type: str = "VARCHAR(4000)") -> str:
+def generate_staging_ddl(target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)") -> str:
     """
     Generates Teradata DDL for a NOPI staging table with all payload columns
     typed as VARCHAR(4000) and standard audit columns appended.
@@ -230,7 +233,7 @@ NO PRIMARY INDEX;"""
     return ddl
 
 
-def recreate_staging_table(connection, target_db: str, target_table: str, columns: list[str], default_type: str = "VARCHAR(4000)"):
+def recreate_staging_table(connection, target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)"):
     """
     Executes DROP TABLE (if table exists) followed by CREATE MULTISET TABLE ... NO PRIMARY INDEX.
     """
@@ -258,7 +261,7 @@ def recreate_staging_table(connection, target_db: str, target_table: str, column
         cursor.close()
 
 
-def sync_entity_schema_if_drifted(connection, target_db: str, target_table: str, sample_file_path: str, default_type: str = "VARCHAR(4000)") -> tuple[bool, str, list[str]]:
+def sync_entity_schema_if_drifted(connection, target_db: str, target_table: str, sample_file_path: str, default_type: str = "VARCHAR(4000)") -> Tuple[bool, str, List[str]]:
     """
     Compares CSV/PECSV header columns in sample_file_path with the Teradata staging table.
     If the table does not exist or columns have drifted:

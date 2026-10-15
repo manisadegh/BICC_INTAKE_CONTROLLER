@@ -6,12 +6,15 @@ vaults original raw BICC manifests with JSON audit receipts, and transfers
 payload batches to the Orchestrator's LANDING_ZONE.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
 import os
 import shutil
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -33,7 +36,7 @@ def create_standardized_manifest(
     source: str,
     extract_timestamp: str,
     batch_id: str,
-    file_checksum_pairs: list[tuple[str, str]]
+    file_checksum_pairs: List[Tuple[str, str]]
 ) -> str:
     """
     Generates an orchestrator-compliant standardized manifest:
@@ -64,7 +67,7 @@ def vault_raw_manifest(
     source: str,
     extract_timestamp: str,
     batch_id: str,
-    receipt_payload: list[dict]
+    receipt_payload: List[Dict]
 ) -> str:
     """
     Vaults the pristine original BICC manifest into:
@@ -100,8 +103,8 @@ def vault_raw_manifest(
 def transfer_batch_to_landing_zone(
     drop_zone_dir: str,
     landing_zone_dir: str,
-    data_files: list[str],
-    standardized_manifest_path: str = None
+    data_files: List[str],
+    standardized_manifest_path: Optional[str] = None
 ):
     """
     Moves data files (and standardized manifest if not already generated there)

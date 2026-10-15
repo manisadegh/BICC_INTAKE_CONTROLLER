@@ -8,12 +8,15 @@ table creation, cryptographic manifest standardizing, raw manifest vaulting, and
 delegation to DATA_INGESTION_ORCHESTRATOR under strict FAIL_STOP semantics.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import os
 import sys
 from datetime import datetime
+from typing import Dict, List, Optional
 import teradatasql
 
 # Ensure local lib/ modules are importable
@@ -112,7 +115,7 @@ def get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection:
     return teradatasql.connect(**kwargs)
 
 
-def select_header_chunk_file(file_list: list[str]) -> str:
+def select_header_chunk_file(file_list: List[str]) -> str:
     """
     Among a list of chunk files for an entity, returns the file containing the header.
     In BICC multi-chunk conventions, part1.csv or the first alphabetical chunk contains line 1 header.

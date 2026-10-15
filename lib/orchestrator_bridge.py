@@ -6,10 +6,13 @@ relays stdout/stderr streams in real time to the feeder logger,
 and returns the process exit code to enforce FAIL_STOP semantics.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import subprocess
 import sys
+from typing import Dict, Optional
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -17,8 +20,8 @@ logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 def invoke_orchestrator(
     orchestrator_dir: str,
     config_file: str = "config.json",
-    python_bin: str = None,
-    env: dict = None
+    python_bin: Optional[str] = None,
+    env: Optional[Dict] = None
 ) -> int:
     """
     Synchronously invokes DATA_INGESTION_ORCHESTRATOR via subprocess:
