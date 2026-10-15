@@ -1,30 +1,29 @@
 {
   "feeder": {
-    "drop_zone": "/path/to/DROP_ZONE",
-    "raw_manifest_archive": "/path/to/DROP_ZONE/archive",
-    "logs_dir": "logs",
+    "drop_zone": "../../DATA/DROP_ZONE",
+    "raw_manifest_archive": "../../DATA/DROP_ZONE/ARCHIVE",
+    "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
-    "file_stability_window_seconds": 5,
+    "file_stability_window_seconds": 3,
     "source_system_code": "ORACLE_FUSION"
   },
   "schema_guard": {
     "auto_migrate_ddl": true,
     "default_column_type": "VARCHAR(4000)",
     "character_set": "UNICODE",
-    "target_database": "DEV0SIDFINSTG",
-    "entity_mapping_file": "entity_mapping.csv"
+    "target_database": "${TDENV}SIDFINSTG",
+    "entity_mapping_file": "../../CONFIG/entity_mapping.csv"
   },
   "orchestrator": {
-    "orchestrator_dir": "/path/to/BICC-Orchestrator",
+    "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
-    "landing_zone": "/path/to/LANDING_ZONE",
-    "python_executable": "python"
+    "landing_zone": "../../DATA/LANDING_ZONE",
+    "python_executable": "python3"
   },
   "teradata": {
-    "host": "<TERADATA_HOST>",
-    "user": "<TERADATA_USER>",
-    "password": "<TERADATA_PASSWORD>",
+    "host": "${TDPID}",
+    "user": "${TDENV}${SID_ADM_USER}",
     "logmech": "TD2"
   }
 }
