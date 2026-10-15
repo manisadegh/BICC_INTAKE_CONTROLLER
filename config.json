@@ -1,30 +1,29 @@
 {
   "feeder": {
-    "drop_zone": "C:/Users/ms250192/Projects/generic_tpt_script/MY_BICC_PROJECT/DROP_ZONE",
-    "raw_manifest_archive": "C:/Users/ms250192/Projects/generic_tpt_script/MY_BICC_PROJECT/DROP_ZONE/ARCHIVE",
-    "logs_dir": "C:/Users/ms250192/Projects/generic_tpt_script/BICC_INTAKE_CONTROLLER/logs",
+    "drop_zone": "../../DATA/DROP_ZONE",
+    "raw_manifest_archive": "../../DATA/DROP_ZONE/ARCHIVE",
+    "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
-    "file_stability_window_seconds": 1,
+    "file_stability_window_seconds": 3,
     "source_system_code": "ORACLE_FUSION"
   },
   "schema_guard": {
     "auto_migrate_ddl": true,
     "default_column_type": "VARCHAR(4000)",
     "character_set": "UNICODE",
-    "target_database": "DEV0SIDFINSTG",
-    "entity_mapping_file": "C:/Users/ms250192/Projects/generic_tpt_script/BICC_INTAKE_CONTROLLER/entity_mapping.csv"
+    "target_database": "${TDENV}SIDFINSTG",
+    "entity_mapping_file": "../../CONFIG/entity_mapping.csv"
   },
   "orchestrator": {
-    "orchestrator_dir": "C:/Users/ms250192/Projects/generic_tpt_script/MY_BICC_PROJECT/BICC-Orchestrator",
+    "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
-    "landing_zone": "C:/Users/ms250192/Projects/generic_tpt_script/MY_BICC_PROJECT/LANDING_ZONE",
-    "python_executable": "python"
+    "landing_zone": "../../DATA/LANDING_ZONE",
+    "python_executable": "python3"
   },
   "teradata": {
-    "host": "ms-env-ox1ux8g51742ej2y.env.trial.teradata.com",
-    "user": "demo_user",
-    "password": "Azemlk123!",
+    "host": "${TDPID}",
+    "user": "${TDENV}${SID_ADM_USER}",
     "logmech": "TD2"
   }
 }
