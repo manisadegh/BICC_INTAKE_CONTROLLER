@@ -139,7 +139,7 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 {
   "feeder": {
     "drop_zone": "../../DATA/DROP_ZONE",
-    "raw_manifest_archive": "../../DATA/DROP_ZONE/ARCHIVE",
+    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS",
     "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
@@ -179,7 +179,7 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `drop_zone` | String | `../../DATA/DROP_ZONE` | Path to directory where upstream BICC transfers files. |
-| `raw_manifest_archive` | String | `../../DATA/DROP_ZONE/ARCHIVE` | Vault directory where raw incoming manifests and intake receipts are archived. |
+| `raw_manifest_archive` | String | `../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS` | Vault directory where raw incoming manifests and intake receipts are archived. |
 | `logs_dir` | String | `../../LOGS` | Central directory where execution logs are written. |
 | `batch_selection_policy` | String | `FIFO_ALL` | Policy for processing multi-batch queues. Currently `FIFO_ALL` processes all detected batches from oldest to newest. |
 | `on_batch_failure` | String | `abort` | Policy on downstream error: `abort` applies `FAIL_STOP`, exiting immediately. |

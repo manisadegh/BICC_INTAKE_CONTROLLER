@@ -200,11 +200,18 @@ def main():
     elif not raw_archive and drop_zone:
         raw_archive = os.path.join(drop_zone, "archive")
 
+    # Multi-source support for raw manifest vaulting
+    if default_source and raw_archive and "ORACLE_FUSION_MANIFESTS" in raw_archive and default_source != "ORACLE_FUSION":
+        raw_archive = raw_archive.replace("ORACLE_FUSION_MANIFESTS", f"{default_source}_MANIFESTS")
+
     logs_dir = feeder_cfg.get("logs_dir")
     if logs_dir and not os.path.isabs(logs_dir):
         logs_dir = os.path.normpath(os.path.join(base_dir, logs_dir))
     elif not logs_dir:
         logs_dir = os.path.join(SCRIPT_DIR, "logs")
+
+    if args.source:
+        logs_dir = os.path.join(logs_dir, args.source)
 
     target_db = schema_cfg.get("target_database") or f"{os.environ.get('TDENV', '')}SIDFINSTG"
     mapping_file = schema_cfg.get("entity_mapping_file", "entity_mapping.csv")

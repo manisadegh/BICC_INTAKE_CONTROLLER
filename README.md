@@ -98,7 +98,7 @@ The controller configuration uses portable relative paths and environment variab
 {
   "feeder": {
     "drop_zone": "../../DATA/DROP_ZONE",
-    "raw_manifest_archive": "../../DATA/DROP_ZONE/ARCHIVE",
+    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS",
     "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
