@@ -17,7 +17,34 @@ import os
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional
+import atexit
+import time
 import teradatasql
+
+def is_pid_alive(pid: int) -> bool:
+    """Checks if a given process ID is actively running."""
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            process = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if process != 0:
+                kernel32.CloseHandle(process)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+        except PermissionError:
+            return True
 
 # Ensure local lib/ modules are importable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -137,6 +164,8 @@ def expand_env_vars(data):
 def main():
     parser = argparse.ArgumentParser(description="BICC Intake Controller - Over-Arching Oracle Fusion Feeder")
     parser.add_argument("--config", type=str, required=True, help="Path to controller configuration JSON file")
+    parser.add_argument("--skip-post-tasks", action="store_true", default=False, help="Skip execution of downstream post-ingestion tasks (e.g. dbt)")
+    parser.add_argument("--source", type=str, default=None, help="Explicit data source system code override")
     args = parser.parse_args()
 
     # 1. Load Configuration
@@ -154,9 +183,16 @@ def main():
     orch_bridge_cfg = config.get("orchestrator", {})
     td_cfg = config.get("teradata", {})
 
+    settling_sec = feeder_cfg.get("file_stability_window_seconds", 5)
+    default_source = args.source or feeder_cfg.get("source_system_code", "ORACLE_FUSION")
+
     drop_zone = feeder_cfg.get("drop_zone")
     if drop_zone and not os.path.isabs(drop_zone):
         drop_zone = os.path.normpath(os.path.join(base_dir, drop_zone))
+
+    # Multi-Source Directory Support
+    if drop_zone and os.path.isdir(os.path.join(drop_zone, default_source)):
+        drop_zone = os.path.join(drop_zone, default_source)
 
     raw_archive = feeder_cfg.get("raw_manifest_archive")
     if raw_archive and not os.path.isabs(raw_archive):
@@ -169,9 +205,6 @@ def main():
         logs_dir = os.path.normpath(os.path.join(base_dir, logs_dir))
     elif not logs_dir:
         logs_dir = os.path.join(SCRIPT_DIR, "logs")
-
-    settling_sec = feeder_cfg.get("file_stability_window_seconds", 5)
-    default_source = feeder_cfg.get("source_system_code", "ORACLE_FUSION")
 
     target_db = schema_cfg.get("target_database") or f"{os.environ.get('TDENV', '')}SIDFINSTG"
     mapping_file = schema_cfg.get("entity_mapping_file", "entity_mapping.csv")
@@ -192,19 +225,89 @@ def main():
     # 2. Bootstrap Logger
     logger = setup_logger(logs_dir)
     logger.info("=" * 70)
-    logger.info("STARTING BICC INTAKE CONTROLLER - SUPERVISOR RUN")
+    logger.info(f"STARTING BICC INTAKE CONTROLLER - SUPERVISOR RUN (Source: {default_source})")
     logger.info("=" * 70)
     logger.info(f"Drop Zone: {drop_zone}")
     logger.info(f"Target Database: {target_db}")
     logger.info(f"Orchestrator Directory: {orch_dir}")
 
-    # 2.5 Check for In-Flight Batch in LOADING_ZONE (Crash Recovery)
+    # 2.3 Feeder Concurrency Guard (Mutual Exclusion per Source)
+    concurrency_cfg = feeder_cfg.get("concurrency", {})
+    poll_interval_sec = concurrency_cfg.get("poll_interval_seconds", 5)
+    lock_timeout_sec = concurrency_cfg.get("lock_timeout_seconds", 7200)
+
+    if drop_zone:
+        os.makedirs(drop_zone, exist_ok=True)
+        feeder_lock_file = os.path.join(drop_zone, f".feeder_{default_source}.pid")
+        if os.path.exists(feeder_lock_file):
+            try:
+                with open(feeder_lock_file, "r") as pf:
+                    active_fpid = int(pf.read().strip())
+            except Exception:
+                active_fpid = -1
+            if is_pid_alive(active_fpid) and active_fpid != os.getpid():
+                logger.info(f"Another BICC Intake Controller is currently active (PID {active_fpid}). Entering active waiting loop (polling every {poll_interval_sec}s, timeout: {lock_timeout_sec}s)...")
+                start_w = time.time()
+                while is_pid_alive(active_fpid):
+                    if time.time() - start_w > lock_timeout_sec:
+                        logger.critical(f"FATAL: Timeout ({lock_timeout_sec}s) exceeded waiting for active feeder (PID {active_fpid}).")
+                        sys.exit(1)
+                    time.sleep(poll_interval_sec)
+                    logger.info(f"Feeder PID {active_fpid} still running. Waiting {poll_interval_sec}s...")
+                logger.info(f"Active feeder PID {active_fpid} has completed. Resuming execution.")
+            if os.path.exists(feeder_lock_file):
+                try:
+                    os.remove(feeder_lock_file)
+                except Exception:
+                    pass
+
+        try:
+            with open(feeder_lock_file, "w") as pf:
+                pf.write(str(os.getpid()))
+        except Exception as e:
+            logger.warning(f"Could not write feeder PID lock file {feeder_lock_file}: {e}")
+
+        def cleanup_feeder_pid():
+            if os.path.exists(feeder_lock_file):
+                try:
+                    with open(feeder_lock_file, "r") as pf:
+                        spid = int(pf.read().strip())
+                    if spid == os.getpid():
+                        os.remove(feeder_lock_file)
+                except Exception:
+                    pass
+        atexit.register(cleanup_feeder_pid)
+
+    # 2.5 Check for Active Orchestrator Run or In-Flight Batch in LOADING_ZONE (Crash Recovery)
     loading_zone = os.path.normpath(os.path.join(landing_zone, "../LOADING_ZONE")) if landing_zone else None
     if loading_zone and os.path.exists(loading_zone):
+        orch_pid_file = os.path.join(loading_zone, ".orchestrator.pid")
+        if os.path.exists(orch_pid_file):
+            try:
+                with open(orch_pid_file, "r") as pf:
+                    orch_pid = int(pf.read().strip())
+            except Exception:
+                orch_pid = -1
+            if is_pid_alive(orch_pid):
+                logger.info(f"An Orchestrator run is actively in progress in LOADING_ZONE (PID {orch_pid}). Entering active wait loop...")
+                start_w = time.time()
+                while is_pid_alive(orch_pid):
+                    if time.time() - start_w > lock_timeout_sec:
+                        logger.critical(f"FATAL: Timeout ({lock_timeout_sec}s) exceeded waiting for active Orchestrator (PID {orch_pid}).")
+                        sys.exit(1)
+                    time.sleep(poll_interval_sec)
+                    logger.info(f"Orchestrator PID {orch_pid} still active in LOADING_ZONE. Waiting {poll_interval_sec}s...")
+                logger.info(f"Active Orchestrator (PID {orch_pid}) finished execution.")
+                if os.path.exists(orch_pid_file):
+                    try:
+                        os.remove(orch_pid_file)
+                    except Exception:
+                        pass
+
         in_flight_mf = [f for f in os.listdir(loading_zone) if f.upper().endswith(".MF")]
         if in_flight_mf:
-            logger.info(f"In-flight batch detected in LOADING_ZONE ({in_flight_mf[0]}). Resuming Orchestrator delegation...")
-            rc = invoke_orchestrator(orch_dir, orch_config, python_bin)
+            logger.info(f"In-flight batch detected in LOADING_ZONE ({in_flight_mf[0]}). Resuming Orchestrator delegation (Crash Recovery)...")
+            rc = invoke_orchestrator(orch_dir, orch_config, python_bin, skip_post_tasks=args.skip_post_tasks, source=default_source)
             if rc != 0:
                 logger.critical("FATAL: In-flight batch recovery failed under FAIL_STOP policy.")
                 sys.exit(rc)
@@ -318,6 +421,9 @@ def main():
 
             # 6.6 Synthesize Standardized Manifest in Orchestrator's LANDING_ZONE
             target_landing_zone = landing_zone or os.path.join(orch_dir, "../LANDING_ZONE")
+            if os.path.isdir(os.path.join(target_landing_zone, source)):
+                target_landing_zone = os.path.join(target_landing_zone, source)
+
             create_standardized_manifest(
                 output_dir=target_landing_zone,
                 source=source,
@@ -338,7 +444,9 @@ def main():
             orch_rc = invoke_orchestrator(
                 orchestrator_dir=orch_dir,
                 config_file=orch_config,
-                python_bin=python_bin
+                python_bin=python_bin,
+                skip_post_tasks=args.skip_post_tasks,
+                source=source
             )
 
             # 6.9 Evaluate Outcome (FAIL_STOP)

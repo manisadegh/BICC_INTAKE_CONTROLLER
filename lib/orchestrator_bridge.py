@@ -21,11 +21,13 @@ def invoke_orchestrator(
     orchestrator_dir: str,
     config_file: str = "config.json",
     python_bin: Optional[str] = None,
-    env: Optional[Dict] = None
+    env: Optional[Dict] = None,
+    skip_post_tasks: bool = False,
+    source: Optional[str] = None
 ) -> int:
     """
     Synchronously invokes DATA_INGESTION_ORCHESTRATOR via subprocess:
-      <python_bin> orchestrator.py --config <config_file>
+      <python_bin> orchestrator.py --config <config_file> [--skip-post-tasks] [--source <source>]
     Streams stdout/stderr in real-time to the logger.
     Returns the process exit code.
     """
@@ -37,6 +39,10 @@ def invoke_orchestrator(
         raise FileNotFoundError(f"orchestrator.py not found at: '{orch_script}'")
 
     cmd = [python_bin, orch_script, "--config", config_file]
+    if skip_post_tasks:
+        cmd.append("--skip-post-tasks")
+    if source:
+        cmd.extend(["--source", source])
     logger.info(f"Invoking Orchestrator: {' '.join(cmd)} (cwd: '{orchestrator_dir}')")
 
     run_env = os.environ.copy()
