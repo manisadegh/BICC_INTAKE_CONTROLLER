@@ -50,6 +50,9 @@ Comprehensive operational, technical, and testing manuals are available in the [
 - **Audit Columns Auto-Injection**: Appends `INFA_LAST_REPLICATED TIMESTAMP(0)` and `INFA_BATCH_ID VARCHAR(100)` to all target staging definitions.
 - **Cryptographic Manifest Factory**: Computes MD5 checksums across all data files and synthesizes standard `MANIFEST_ORACLE_FUSION_<TIMESTAMP>_<BATCH_ID>.MF` manifests for the Orchestrator.
 - **Regulatory Manifest Vault**: Preserves pristine raw BICC manifests in `DROP_ZONE/ARCHIVE/<BATCH_ID>/` alongside a detailed JSON intake audit receipt (`intake_receipt.json`).
+- **Source-Specific Post-Tasks**: Configures source hooks (`post_ingestion_tasks`) automatically dumped to JSON and forwarded to the Orchestrator via `--post-tasks-file`.
+- **Single-Flight Concurrency & Active Polling**: Implements process locking (`.feeder_<source>.pid`) with active polling loop on active PIDs, avoiding collisions and Teradata 2652 errors.
+- **Hybrid Decoupling Support**: Supports `--skip-post-tasks` CLI flag to bypass post-load models during maintenance or historical re-inits.
 - **FAIL_STOP Barrier**: Halts immediately on the first sign of worker, TPT, or downstream transformation failure, preventing cascade corruption.
 
 ---
@@ -100,7 +103,13 @@ The controller configuration uses portable relative paths and environment variab
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
     "file_stability_window_seconds": 3,
-    "source_system_code": "ORACLE_FUSION"
+    "source_system_code": "ORACLE_FUSION",
+    "post_ingestion_tasks": [
+      {
+        "type": "shell",
+        "command": "echo 'Post-task specific to BICC completed for batch $CURRENT_BATCH_ID'"
+      }
+    ]
   },
   "schema_guard": {
     "auto_migrate_ddl": true,
@@ -141,9 +150,19 @@ ORACLE_FUSION,ERP_MSH_USER_AK,userpvo,".pecsv,.zip,.gz,.pecsv.gz",.pecsv
 
 ## Usage & Execution
 
-Launch the supervisor controller:
+### Standard Batch Ingestion
 ```bash
 python3 feeder.py --config config.json
+```
+
+### Ingestion with Post-Tasks Skipped (Maintenance / Inits)
+```bash
+python3 feeder.py --config config.json --skip-post-tasks
+```
+
+### Multi-Source Partition Ingestion
+```bash
+python3 feeder.py --config config.json --source <SOURCE>
 ```
 
 If `DROP_ZONE` contains no batches, the process exits cleanly with Return Code `0`.
