@@ -190,10 +190,7 @@ def main():
     drop_zone = feeder_cfg.get("drop_zone")
     if drop_zone and not os.path.isabs(drop_zone):
         drop_zone = os.path.normpath(os.path.join(base_dir, drop_zone))
-
-    # Multi-Source Directory Support
-    if drop_zone and os.path.isdir(os.path.join(drop_zone, default_source)):
-        drop_zone = os.path.join(drop_zone, default_source)
+    base_drop_zone = drop_zone
 
     raw_archive = feeder_cfg.get("raw_manifest_archive")
     if raw_archive and not os.path.isabs(raw_archive):
@@ -257,29 +254,40 @@ def main():
 
     if drop_zone:
         os.makedirs(drop_zone, exist_ok=True)
-        feeder_lock_file = os.path.join(drop_zone, f".feeder_{default_source}.pid")
-        if os.path.exists(feeder_lock_file):
-            try:
-                with open(feeder_lock_file, "r") as pf:
-                    active_fpid = int(pf.read().strip())
-            except Exception:
-                active_fpid = -1
-            if is_pid_alive(active_fpid) and active_fpid != os.getpid():
-                logger.info(f"Another BICC Intake Controller is currently active (PID {active_fpid}). Entering active waiting loop (polling every {poll_interval_sec}s, timeout: {lock_timeout_sec}s)...")
-                start_w = time.time()
-                while is_pid_alive(active_fpid):
-                    if time.time() - start_w > lock_timeout_sec:
-                        logger.critical(f"FATAL: Timeout ({lock_timeout_sec}s) exceeded waiting for active feeder (PID {active_fpid}).")
-                        sys.exit(1)
-                    time.sleep(poll_interval_sec)
-                    logger.info(f"Feeder PID {active_fpid} still running. Waiting {poll_interval_sec}s...")
-                logger.info(f"Active feeder PID {active_fpid} has completed. Resuming execution.")
-            if os.path.exists(feeder_lock_file):
+        lock_dirs = list(dict.fromkeys([d for d in [drop_zone, base_drop_zone] if d and os.path.exists(d)]))
+        active_fpid = -1
+        for ld in lock_dirs:
+            lf = os.path.join(ld, f".feeder_{default_source}.pid")
+            if os.path.exists(lf):
                 try:
-                    os.remove(feeder_lock_file)
+                    with open(lf, "r") as pf:
+                        chk_pid = int(pf.read().strip())
+                    if is_pid_alive(chk_pid) and chk_pid != os.getpid():
+                        active_fpid = chk_pid
+                        break
                 except Exception:
                     pass
 
+        if active_fpid > 0:
+            logger.info(f"Another BICC Intake Controller is currently active (PID {active_fpid}). Entering active waiting loop (polling every {poll_interval_sec}s, timeout: {lock_timeout_sec}s)...")
+            start_w = time.time()
+            while is_pid_alive(active_fpid):
+                if time.time() - start_w > lock_timeout_sec:
+                    logger.critical(f"FATAL: Timeout ({lock_timeout_sec}s) exceeded waiting for active feeder (PID {active_fpid}).")
+                    sys.exit(1)
+                time.sleep(poll_interval_sec)
+                logger.info(f"Feeder PID {active_fpid} still running. Waiting {poll_interval_sec}s...")
+            logger.info(f"Active feeder PID {active_fpid} has completed. Resuming execution.")
+
+        for ld in lock_dirs:
+            lf = os.path.join(ld, f".feeder_{default_source}.pid")
+            if os.path.exists(lf):
+                try:
+                    os.remove(lf)
+                except Exception:
+                    pass
+
+        feeder_lock_file = os.path.join(drop_zone, f".feeder_{default_source}.pid")
         try:
             with open(feeder_lock_file, "w") as pf:
                 pf.write(str(os.getpid()))
@@ -287,19 +295,28 @@ def main():
             logger.warning(f"Could not write feeder PID lock file {feeder_lock_file}: {e}")
 
         def cleanup_feeder_pid():
-            if os.path.exists(feeder_lock_file):
-                try:
-                    with open(feeder_lock_file, "r") as pf:
-                        spid = int(pf.read().strip())
-                    if spid == os.getpid():
-                        os.remove(feeder_lock_file)
-                except Exception:
-                    pass
+            for ld in lock_dirs:
+                lf = os.path.join(ld, f".feeder_{default_source}.pid")
+                if os.path.exists(lf):
+                    try:
+                        with open(lf, "r") as pf:
+                            spid = int(pf.read().strip())
+                        if spid == os.getpid():
+                            os.remove(lf)
+                    except Exception:
+                        pass
         atexit.register(cleanup_feeder_pid)
 
     # 2.5 Check for Active Orchestrator Run or In-Flight Batch in LOADING_ZONE (Crash Recovery)
     loading_zone = os.path.normpath(os.path.join(landing_zone, "../LOADING_ZONE")) if landing_zone else None
     if loading_zone and os.path.exists(loading_zone):
+        # Support partitioned LOADING_ZONE/<source> if populated or contains lock
+        src_loading = os.path.join(loading_zone, default_source) if default_source else None
+        if src_loading and os.path.isdir(src_loading) and (
+            any(f.upper().endswith(".MF") for f in os.listdir(src_loading)) or
+            os.path.exists(os.path.join(src_loading, ".orchestrator.pid"))
+        ):
+            loading_zone = src_loading
         # 2.5.0 Query Teradata BATCH_RUNS for active batch & PROCESS_PID
         try:
             tech_db = td_cfg.get("technical_database") or f"{os.environ.get('TDENV', '')}SIDFINTCH"
