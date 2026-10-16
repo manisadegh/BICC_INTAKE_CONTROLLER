@@ -211,8 +211,19 @@ def main():
     elif not logs_dir:
         logs_dir = os.path.join(SCRIPT_DIR, "logs")
 
-    if args.source:
-        logs_dir = os.path.join(logs_dir, args.source)
+    # Always partition logs by source
+    if default_source and os.path.basename(logs_dir).lower() != default_source.lower():
+        logs_dir = os.path.join(logs_dir, default_source)
+    os.makedirs(logs_dir, exist_ok=True)
+
+    # Support partitioned DROP_ZONE/<source> if populated
+    src_drop = os.path.join(drop_zone, default_source) if drop_zone else ""
+    if src_drop and os.path.isdir(src_drop):
+        try:
+            if any(not f.startswith(".") for f in os.listdir(src_drop)):
+                drop_zone = src_drop
+        except Exception:
+            pass
 
     target_db = schema_cfg.get("target_database") or f"{os.environ.get('TDENV', '')}SIDFINSTG"
     mapping_file = schema_cfg.get("entity_mapping_file", "entity_mapping.csv")
@@ -465,10 +476,11 @@ def main():
                 receipt_payload=receipt_files
             )
 
-            # 6.6 Synthesize Standardized Manifest in Orchestrator's LANDING_ZONE
+            # 6.6 Synthesize Standardized Manifest in Orchestrator's LANDING_ZONE/<SOURCE>
             target_landing_zone = landing_zone or os.path.join(orch_dir, "../LANDING_ZONE")
-            if os.path.isdir(os.path.join(target_landing_zone, source)):
+            if source and os.path.basename(target_landing_zone).lower() != source.lower():
                 target_landing_zone = os.path.join(target_landing_zone, source)
+            os.makedirs(target_landing_zone, exist_ok=True)
 
             create_standardized_manifest(
                 output_dir=target_landing_zone,
@@ -490,7 +502,12 @@ def main():
             post_tasks_file = None
             if source_post_tasks:
                 clean_ts = str(extract_ts).replace(":", "").replace("-", "").replace(" ", "_")
-                post_tasks_file = os.path.join(logs_dir, f"POST_TASKS_{source}_{clean_ts}_{batch_id}.json")
+                year_month = f"{clean_ts[:4]}-{clean_ts[4:6]}" if len(clean_ts) >= 6 else "UNKNOWN_DATE"
+                capsule_folder = f"BATCH_{batch_id}_{clean_ts}"
+                capsule_log_dir = os.path.join(logs_dir, year_month, capsule_folder)
+                os.makedirs(capsule_log_dir, exist_ok=True)
+
+                post_tasks_file = os.path.join(capsule_log_dir, f"POST_TASKS_{source}_{clean_ts}_{batch_id}.json")
                 legacy_pt_file = os.path.join(logs_dir, f"post_tasks_{source}_{batch_id}.json")
                 try:
                     with open(post_tasks_file, "w", encoding="utf-8") as ptf:
