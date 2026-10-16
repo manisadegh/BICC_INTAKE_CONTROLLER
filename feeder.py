@@ -330,7 +330,22 @@ def main():
         in_flight_mf = [f for f in os.listdir(loading_zone) if f.upper().endswith(".MF")]
         if in_flight_mf:
             logger.info(f"In-flight batch detected in LOADING_ZONE ({in_flight_mf[0]}). Resuming Orchestrator delegation (Crash Recovery)...")
-            rc = invoke_orchestrator(orch_dir, orch_config, python_bin, skip_post_tasks=args.skip_post_tasks, source=default_source)
+            source_post_tasks = feeder_cfg.get("post_ingestion_tasks")
+            post_tasks_file = None
+            if source_post_tasks:
+                post_tasks_file = os.path.join(logs_dir, f"post_tasks_{default_source}_inflight.json")
+                try:
+                    with open(post_tasks_file, "w", encoding="utf-8") as ptf:
+                        json.dump(source_post_tasks, ptf, indent=2)
+                except Exception:
+                    post_tasks_file = None
+
+            rc = invoke_orchestrator(
+                orch_dir, orch_config, python_bin,
+                skip_post_tasks=args.skip_post_tasks,
+                source=default_source,
+                post_tasks_file=post_tasks_file
+            )
             if rc != 0:
                 logger.critical("FATAL: In-flight batch recovery failed under FAIL_STOP policy.")
                 sys.exit(rc)
@@ -462,6 +477,19 @@ def main():
                 data_files=declared_files
             )
 
+            # 6.7.1 Prepare source-specific post-tasks file if configured in intake controller
+            source_post_tasks = feeder_cfg.get("post_ingestion_tasks")
+            post_tasks_file = None
+            if source_post_tasks:
+                post_tasks_file = os.path.join(logs_dir, f"post_tasks_{source}_{batch_id}.json")
+                try:
+                    with open(post_tasks_file, "w", encoding="utf-8") as ptf:
+                        json.dump(source_post_tasks, ptf, indent=2)
+                    logger.info(f"Generated source-specific post-tasks file for Orchestrator: {post_tasks_file}")
+                except Exception as e:
+                    logger.warning(f"Could not write post-tasks file {post_tasks_file}: {e}")
+                    post_tasks_file = None
+
             # 6.8 Launch Orchestrator and Enforce Barrier
             logger.info(f"Delegating execution of batch {batch_id} to DATA_INGESTION_ORCHESTRATOR...")
             orch_rc = invoke_orchestrator(
@@ -469,7 +497,8 @@ def main():
                 config_file=orch_config,
                 python_bin=python_bin,
                 skip_post_tasks=args.skip_post_tasks,
-                source=source
+                source=source,
+                post_tasks_file=post_tasks_file
             )
 
             # 6.9 Evaluate Outcome (FAIL_STOP)

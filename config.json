@@ -6,7 +6,13 @@
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
     "file_stability_window_seconds": 3,
-    "source_system_code": "ORACLE_FUSION"
+    "source_system_code": "ORACLE_FUSION",
+    "post_ingestion_tasks": [
+      {
+        "type": "shell",
+        "command": "echo 'Post-task specific to BICC / ORACLE_FUSION completed for batch $CURRENT_BATCH_ID'"
+      }
+    ]
   },
   "schema_guard": {
     "auto_migrate_ddl": true,

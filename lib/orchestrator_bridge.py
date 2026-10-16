@@ -23,11 +23,12 @@ def invoke_orchestrator(
     python_bin: Optional[str] = None,
     env: Optional[Dict] = None,
     skip_post_tasks: bool = False,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    post_tasks_file: Optional[str] = None
 ) -> int:
     """
     Synchronously invokes DATA_INGESTION_ORCHESTRATOR via subprocess:
-      <python_bin> orchestrator.py --config <config_file> [--skip-post-tasks] [--source <source>]
+      <python_bin> orchestrator.py --config <config_file> [--skip-post-tasks] [--source <source>] [--post-tasks-file <file>]
     Streams stdout/stderr in real-time to the logger.
     Returns the process exit code.
     """
@@ -43,6 +44,8 @@ def invoke_orchestrator(
         cmd.append("--skip-post-tasks")
     if source:
         cmd.extend(["--source", source])
+    if post_tasks_file:
+        cmd.extend(["--post-tasks-file", post_tasks_file])
     logger.info(f"Invoking Orchestrator: {' '.join(cmd)} (cwd: '{orchestrator_dir}')")
 
     run_env = os.environ.copy()
