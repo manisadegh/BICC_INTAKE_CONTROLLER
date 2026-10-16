@@ -92,12 +92,14 @@ The controller uses one of two authentication methods:
 
 ### 3.1 Invocation Syntax
 ```bash
-python3 feeder.py --config <path_to_config.json>
+python3 feeder.py --config <path_to_config.json> [--skip-post-tasks] [--source <SOURCE>]
 ```
 
 | Parameter | Required | Type | Description |
 |---|---|---|---|
 | `--config` | **Yes** | String | Path to the JSON configuration file (relative or absolute). |
+| `--skip-post-tasks` | No | Flag | Bypasses downstream post-ingestion tasks (both source-specific and global dbt/analytics models). Useful for re-inits or maintenance loads. |
+| `--source` | No | String | Overrides the source system code (e.g. `ORACLE_FUSION`, `CRM`) and routes file ingress to partitioned subdirectories (`DROP_ZONE/<SOURCE>/`). |
 
 ### 3.2 Standard Execution Examples
 
@@ -108,12 +110,19 @@ cd /sg/local/sid/home/Dsidadm/DATA_LOADER/PROCESSING_TOOLS/BICC_INTAKE_CONTROLLE
 python3 feeder.py --config config.json
 ```
 
-#### Example 2: Sandpit Run with Explicit Log Output
+#### Example 2: Selective / Maintenance Ingestion with Post-Tasks Skipped
+Load incoming tables without triggering downstream dbt transformations:
 ```bash
-python3 feeder.py --config sandpit_config.json 2>&1 | tee -a run.log
+python3 feeder.py --config config.json --skip-post-tasks
 ```
 
-#### Example 3: Scheduled Automation via Cron
+#### Example 3: Multi-Source Partitioned Ingestion
+Process only extracts originating from a specific source partition:
+```bash
+python3 feeder.py --config config.json --source CRM
+```
+
+#### Example 4: Scheduled Automation via Cron
 ```cron
 # Run BICC Intake Controller every 15 minutes
 */15 * * * * cd /sg/local/sid/home/Dsidadm/DATA_LOADER/PROCESSING_TOOLS/BICC_INTAKE_CONTROLLER && python3 feeder.py --config config.json >> /sg/local/sid/home/Dsidadm/DATA_LOADER/LOGS/cron_feeder.log 2>&1
@@ -135,7 +144,13 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
     "file_stability_window_seconds": 3,
-    "source_system_code": "ORACLE_FUSION"
+    "source_system_code": "ORACLE_FUSION",
+    "post_ingestion_tasks": [
+      {
+        "type": "shell",
+        "command": "echo 'Post-task specific to BICC / ORACLE_FUSION completed for batch $CURRENT_BATCH_ID'"
+      }
+    ]
   },
   "schema_guard": {
     "auto_migrate_ddl": true,
@@ -170,6 +185,7 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 | `on_batch_failure` | String | `abort` | Policy on downstream error: `abort` applies `FAIL_STOP`, exiting immediately. |
 | `file_stability_window_seconds` | Integer | `3` | Number of seconds to wait during stability sentry checking before confirming file size constancy. |
 | `source_system_code` | String | `ORACLE_FUSION` | Identifier for the source ERP system. |
+| `post_ingestion_tasks` | List[Dict] | `[]` | Optional list of source-specific post-ingestion tasks (e.g. shell scripts, dbt runs) to delegate to the Orchestrator. |
 
 #### `schema_guard` Block
 | Parameter | Type | Default | Description |

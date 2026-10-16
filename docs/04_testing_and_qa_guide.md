@@ -104,6 +104,13 @@ The following test suite reflects empirical validation performed across test bat
 | **TC-FEED-06** | Zero-Byte File Arrival | 0-byte file in `DROP_ZONE` | Stability sentry flags empty file, aborts. | 1 |
 | **TC-FEED-07** | Schema Drift (Added Column) | Sample CSV with new trailing column | Drops and recreates table with new column (NOPI). | 0 |
 | **TC-FEED-08** | In-Flight Recovery | Pre-existing `.MF` in `LOADING_ZONE` | Bypasses `DROP_ZONE`, completes in-flight batch. | 0 |
+| **TC-FEED-09** | Concurrency & Active Polling Wait | 2 concurrent feeder instances | Detects active PID, polls until lock released, avoids error 2652. | 0 |
+| **TC-FEED-10** | Hybrid Decoupling (`--skip-post-tasks`) | Batch with `--skip-post-tasks` | Ingests data, skips all post-tasks, logs bypass trace. | 0 |
+| **TC-FEED-11** | Multi-Source Partition Isolation | Simultaneous files in `DROP_ZONE/CRM` and `DROP_ZONE/ORACLE_FUSION` | Processes target partition only without touching other sources. | 0 |
+| **TC-FEED-12** | Source Post-Tasks Execution & Skip | Batch 9006 (nominal) & Batch 9008 (`--skip-post-tasks`) | Merges & executes source tasks; cleanly skips all tasks when flag passed. | 0 |
+
+> [!TIP]
+> The automated Unix test suite in [`DATA_LOADER/TESTS/`](../../TESTS/README.md) validates all these scenarios end-to-end on Teradata Vantage with 100% automated pass verification (`./run_all_tests.sh`).
 
 ---
 
