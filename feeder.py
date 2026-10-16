@@ -281,6 +281,29 @@ def main():
     # 2.5 Check for Active Orchestrator Run or In-Flight Batch in LOADING_ZONE (Crash Recovery)
     loading_zone = os.path.normpath(os.path.join(landing_zone, "../LOADING_ZONE")) if landing_zone else None
     if loading_zone and os.path.exists(loading_zone):
+        # 2.5.0 Query Teradata BATCH_RUNS for active batch & PROCESS_PID
+        try:
+            tech_db = td_cfg.get("technical_database") or f"{os.environ.get('TDENV', '')}SIDFINTCH"
+            conn_chk = get_teradata_connection(td_cfg)
+            with conn_chk.cursor() as cur:
+                cur.execute(f"SELECT BATCH_ID, SOURCE, START_TIME, PROCESS_PID FROM {tech_db}.BATCH_RUNS WHERE STATUS = 'RUNNING'")
+                row = cur.fetchone()
+                if row and row[3]:
+                    db_pid = int(row[3])
+                    if is_pid_alive(db_pid) and db_pid != os.getpid():
+                        logger.info(f"Active batch {row[0]} detected in BATCH_RUNS with running PID {db_pid}. Entering active waiting loop...")
+                        start_w = time.time()
+                        while is_pid_alive(db_pid):
+                            if time.time() - start_w > lock_timeout_sec:
+                                logger.critical(f"FATAL: Timeout ({lock_timeout_sec}s) exceeded waiting for active batch {row[0]} (PID {db_pid}).")
+                                sys.exit(1)
+                            time.sleep(poll_interval_sec)
+                            logger.info(f"Batch {row[0]} (PID {db_pid}) still active in BATCH_RUNS. Waiting {poll_interval_sec}s...")
+                        logger.info(f"Active batch {row[0]} (PID {db_pid}) finished execution.")
+            conn_chk.close()
+        except Exception as e:
+            logger.debug(f"Pre-flight Teradata BATCH_RUNS check skipped or non-blocking: {e}")
+
         orch_pid_file = os.path.join(loading_zone, ".orchestrator.pid")
         if os.path.exists(orch_pid_file):
             try:
