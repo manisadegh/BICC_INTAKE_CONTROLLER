@@ -70,33 +70,49 @@ def vault_raw_manifest(
     receipt_payload: List[Dict]
 ) -> str:
     """
-    Vaults the pristine original BICC manifest into:
-      <archive_base_dir>/<EXTRACT_TIMESTAMP>_<BATCH_ID>/
-    and writes an intake receipt audit file:
-      <archive_base_dir>/<EXTRACT_TIMESTAMP>_<BATCH_ID>/intake_receipt.json
-    Returns the path of the vault directory.
+    Vaults the pristine original BICC manifest into the Batch Capsule:
+      <archive_base_dir>/[<SOURCE>/][<YYYY-MM>/]BATCH_<BATCH_ID>_<EXTRACT_TIMESTAMP>/RAW/
+    and writes standardized and legacy intake receipt audit files:
+      RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json & intake_receipt.json
+    Returns the path of the RAW vault directory.
     """
-    vault_dir = os.path.join(archive_base_dir, f"{extract_timestamp}_{batch_id}")
+    clean_ts = str(extract_timestamp).replace(":", "").replace("-", "").replace(" ", "_")
+    year_month = f"{clean_ts[:4]}-{clean_ts[4:6]}" if len(clean_ts) >= 6 else "UNKNOWN_DATE"
+    capsule_name = f"BATCH_{batch_id}_{clean_ts}"
+
+    # Build capsule directory path
+    if os.path.basename(archive_base_dir).lower() == str(source).lower():
+        vault_dir = os.path.join(archive_base_dir, year_month, capsule_name, "RAW")
+    else:
+        vault_dir = os.path.join(archive_base_dir, str(source), year_month, capsule_name, "RAW")
     os.makedirs(vault_dir, exist_ok=True)
 
     raw_basename = os.path.basename(raw_manifest_path)
     vault_manifest_path = os.path.join(vault_dir, raw_basename)
     shutil.move(raw_manifest_path, vault_manifest_path)
 
-    receipt_file = os.path.join(vault_dir, "intake_receipt.json")
+    clean_src = str(source).replace("/", "_").replace("\\", "_")
+    clean_batch = str(batch_id).replace("/", "_").replace("\\", "_")
+    std_receipt_name = f"RECEIPT_{clean_src}_{clean_ts}_{clean_batch}.json"
+    std_receipt_file = os.path.join(vault_dir, std_receipt_name)
+    legacy_receipt_file = os.path.join(vault_dir, "intake_receipt.json")
+
     receipt_data = {
         "batch_id": batch_id,
         "source": source,
         "extract_timestamp": extract_timestamp,
         "intake_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "raw_manifest_vaulted": raw_basename,
+        "receipt_file": std_receipt_name,
         "payload": receipt_payload
     }
 
-    with open(receipt_file, "w", encoding="utf-8") as f:
+    with open(std_receipt_file, "w", encoding="utf-8") as f:
+        json.dump(receipt_data, f, indent=2)
+    with open(legacy_receipt_file, "w", encoding="utf-8") as f:
         json.dump(receipt_data, f, indent=2)
 
-    logger.info(f"Vaulted original manifest '{raw_basename}' and intake receipt to '{vault_dir}'.")
+    logger.info(f"Vaulted original manifest '{raw_basename}' and receipt '{std_receipt_name}' to '{vault_dir}'.")
     return vault_dir
 
 

@@ -49,8 +49,8 @@ Comprehensive operational, technical, and testing manuals are available in the [
 - **Automated Schema Drift Resolution**: Compares CSV header columns with Teradata `DBC.ColumnsV`. Upon schema evolution or missing tables, automatically creates or updates Teradata staging tables in **`NO PRIMARY INDEX` (`NOPI`)** with all payload columns as **`VARCHAR(4000) UNICODE NOT CASESPECIFIC`**.
 - **Audit Columns Auto-Injection**: Appends `INFA_LAST_REPLICATED TIMESTAMP(0)` and `INFA_BATCH_ID VARCHAR(100)` to all target staging definitions.
 - **Cryptographic Manifest Factory**: Computes MD5 checksums across all data files and synthesizes standard `MANIFEST_ORACLE_FUSION_<TIMESTAMP>_<BATCH_ID>.MF` manifests for the Orchestrator.
-- **Regulatory Manifest Vault**: Preserves pristine raw BICC manifests in `DROP_ZONE/ARCHIVE/<BATCH_ID>/` alongside a detailed JSON intake audit receipt (`intake_receipt.json`).
-- **Source-Specific Post-Tasks**: Configures source hooks (`post_ingestion_tasks`) automatically dumped to JSON and forwarded to the Orchestrator via `--post-tasks-file`.
+- **Regulatory Manifest Vault**: Preserves pristine raw BICC manifests in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/` alongside a detailed canonical JSON intake audit receipt (`RECEIPT_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`).
+- **Source-Specific Post-Tasks**: Configures source hooks (`post_ingestion_tasks`) automatically dumped to `POST_TASKS_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` (with legacy fallback) and forwarded to the Orchestrator via `--post-tasks-file`.
 - **Single-Flight Concurrency & Active Polling**: Implements process locking (`.feeder_<source>.pid`) with active polling loop on active PIDs, avoiding collisions and Teradata 2652 errors.
 - **Hybrid Decoupling Support**: Supports `--skip-post-tasks` CLI flag to bypass post-load models during maintenance or historical re-inits.
 - **FAIL_STOP Barrier**: Halts immediately on the first sign of worker, TPT, or downstream transformation failure, preventing cascade corruption.
@@ -98,7 +98,7 @@ The controller configuration uses portable relative paths and environment variab
 {
   "feeder": {
     "drop_zone": "../../DATA/DROP_ZONE",
-    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS",
+    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE",
     "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
@@ -174,6 +174,6 @@ If `DROP_ZONE` contains no batches, the process exits cleanly with Return Code `
 | Exit Code | Meaning | Action |
 | :---: | :--- | :--- |
 | `0` | All batches processed successfully, or `DROP_ZONE` is empty (`IDLE`). | Normal operation. |
-| `1` | Payload stability failure, schema DDL error, or Orchestrator failure (`FAIL_STOP`). | Inspect `LOGS/feeder_<TIMESTAMP>.log` and Teradata `BATCH_TASKS` table. |
+| `1` | Payload stability failure, schema DDL error, or Orchestrator failure (`FAIL_STOP`). | Inspect `LOGS/<SOURCE>/LOG_FEEDER_<SOURCE>_<TIMESTAMP>.log` and Teradata `BATCH_TASKS` table. |
 
 For detailed failure scenarios and step-by-step remediation procedures, consult **[docs/01_user_how_to_guide.md](docs/01_user_how_to_guide.md)**.

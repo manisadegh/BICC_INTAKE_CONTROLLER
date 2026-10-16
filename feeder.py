@@ -66,14 +66,15 @@ from lib.manifest_factory import (
 from lib.orchestrator_bridge import invoke_orchestrator
 
 
-def setup_logger(logs_dir: str) -> logging.Logger:
+def setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger:
     """
     Sets up dual stream and dedicated file logging in logs_dir:
-      logs/feeder_<YYYYMMDD_HHMMSS>.log
+      LOGS/[<SOURCE>/]LOG_FEEDER_<SOURCE>_<YYYYMMDD_HHMMSS>.log
     """
     os.makedirs(logs_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(logs_dir, f"feeder_{ts}.log")
+    src_tag = f"_{source}" if source else ""
+    log_file = os.path.join(logs_dir, f"LOG_FEEDER{src_tag}_{ts}.log")
 
     logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
     logger.setLevel(logging.INFO)
@@ -230,7 +231,7 @@ def main():
     python_bin = orch_bridge_cfg.get("python_executable", "python3")
 
     # 2. Bootstrap Logger
-    logger = setup_logger(logs_dir)
+    logger = setup_logger(logs_dir, source=default_source)
     logger.info("=" * 70)
     logger.info(f"STARTING BICC INTAKE CONTROLLER - SUPERVISOR RUN (Source: {default_source})")
     logger.info("=" * 70)
@@ -488,10 +489,14 @@ def main():
             source_post_tasks = feeder_cfg.get("post_ingestion_tasks")
             post_tasks_file = None
             if source_post_tasks:
-                post_tasks_file = os.path.join(logs_dir, f"post_tasks_{source}_{batch_id}.json")
+                clean_ts = str(extract_ts).replace(":", "").replace("-", "").replace(" ", "_")
+                post_tasks_file = os.path.join(logs_dir, f"POST_TASKS_{source}_{clean_ts}_{batch_id}.json")
+                legacy_pt_file = os.path.join(logs_dir, f"post_tasks_{source}_{batch_id}.json")
                 try:
                     with open(post_tasks_file, "w", encoding="utf-8") as ptf:
                         json.dump(source_post_tasks, ptf, indent=2)
+                    with open(legacy_pt_file, "w", encoding="utf-8") as lptf:
+                        json.dump(source_post_tasks, lptf, indent=2)
                     logger.info(f"Generated source-specific post-tasks file for Orchestrator: {post_tasks_file}")
                 except Exception as e:
                     logger.warning(f"Could not write post-tasks file {post_tasks_file}: {e}")
