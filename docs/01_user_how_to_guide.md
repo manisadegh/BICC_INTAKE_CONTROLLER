@@ -29,16 +29,16 @@ flowchart TD
     end
 
     RawBatch --> Scan --> Stab --> Schema --> AutoDDL --> Vault
-    Vault -->|Atomic Transfer| LANDING_ZONE
-    Vault -->|Archive Raw & Receipt| DropArchive["DROP_ZONE/ARCHIVE/<TS>_<ID>/"]
+    Vault -->|Atomic Transfer| LANDING_ZONE["LANDING_ZONE/<SOURCE>/"]
+    Vault -->|Archive Raw & Receipt| DropArchive["ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/"]
     Delegate -->|Executes Subprocess| OrchPy
 ```
 
 ### Core Responsibilities
-1. **FIFO Ingress Queueing**: Automatically detects multi-batch arrivals in `DROP_ZONE` and executes them strictly in ascending chronological order (oldest extract first) to preserve temporal data integrity.
+1. **FIFO Ingress Queueing**: Automatically detects multi-batch arrivals in `DROP_ZONE/<SOURCE>/` and executes them strictly in ascending chronological order (oldest extract first) to preserve temporal data integrity. Files deposited at the root of `DROP_ZONE/` are strictly ignored to prevent cross-source data corruption.
 2. **File Stability Sentry**: Verifies that files are non-empty (>0 bytes) and that file sizes do not fluctuate during a configurable settling window (guarantees external SFTP/cloud copy completion).
 3. **Automated Schema Guard**: Detects schema drift in source extracts without extracting compressed files to disk (streams headers directly from `.zip` / `.gz` archives) and auto-recreates target Teradata staging tables in `NOPI` `VARCHAR(4000)` format when needed.
-4. **Standardized Cryptographic Manifest**: Calculates MD5 sums on data payloads, vaults the pristine upstream raw manifest with a JSON intake receipt, and moves the batch atomically into `LANDING_ZONE`.
+4. **Standardized Cryptographic Manifest**: Calculates MD5 sums on data payloads, vaults the pristine upstream raw manifest with a JSON intake receipt (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json`), and moves the batch atomically into `LANDING_ZONE/<SOURCE>/`.
 5. **FAIL_STOP Delegation**: Synchronously invokes `DATA_INGESTION_ORCHESTRATOR` and aborts immediately if any downstream step fails.
 
 ---
@@ -139,7 +139,7 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 {
   "feeder": {
     "drop_zone": "../../DATA/DROP_ZONE",
-    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS",
+    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE",
     "logs_dir": "../../LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
@@ -178,9 +178,9 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 #### `feeder` Block
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `drop_zone` | String | `../../DATA/DROP_ZONE` | Path to directory where upstream BICC transfers files. |
-| `raw_manifest_archive` | String | `../../DATA/ARCHIVE_ZONE/ORACLE_FUSION_MANIFESTS` | Vault directory where raw incoming manifests and intake receipts are archived. |
-| `logs_dir` | String | `../../LOGS` | Central directory where execution logs are written. |
+| `drop_zone` | String | `../../DATA/DROP_ZONE` | Path to upstream arrival base directory. Feeder automatically partitions to `DROP_ZONE/<SOURCE>/` (e.g. `DROP_ZONE/ORACLE_FUSION/`). Files dropped at the root of `DROP_ZONE/` are strictly ignored. |
+| `raw_manifest_archive` | String | `../../DATA/ARCHIVE_ZONE` | Base archive directory. Raw manifests and intake receipts are vaulted inside the Batch Capsule: `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`. |
+| `logs_dir` | String | `../../LOGS` | Central directory where execution logs are written, automatically partitioned by source (`LOGS/<SOURCE>/`). |
 | `batch_selection_policy` | String | `FIFO_ALL` | Policy for processing multi-batch queues. Currently `FIFO_ALL` processes all detected batches from oldest to newest. |
 | `on_batch_failure` | String | `abort` | Policy on downstream error: `abort` applies `FAIL_STOP`, exiting immediately. |
 | `file_stability_window_seconds` | Integer | `3` | Number of seconds to wait during stability sentry checking before confirming file size constancy. |
@@ -218,32 +218,31 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 ## 5. Monitoring & Operational Inspection
 
 ### 5.1 Log Files & Naming Convention
-Logs are written simultaneously to standard output (`stdout`) and to timestamped log files in `logs_dir`:
+Logs are written simultaneously to standard output (`stdout`) and to timestamped log files in `logs_dir/<SOURCE>/`:
 ```
-../../LOGS/feeder_YYYYMMDD_HHMMSS.log
+../../LOGS/<SOURCE>/LOG_FEEDER_<SOURCE>_<EXEC_TS>.log
 ```
-Example: `../../LOGS/feeder_20261015_120920.log`
+Example: `../../LOGS/ORACLE_FUSION/LOG_FEEDER_ORACLE_FUSION_20261016_173927.log`
 
 ### 5.2 Interpreting Controller Logs
 A typical successful execution displays:
 ```text
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | Initialized BICC Intake Controller log file: '/sg/local/sid/home/Dsidadm/DATA_LOADER/LOGS/feeder_20261015_120920.log'
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | ======================================================================
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | STARTING BICC INTAKE CONTROLLER - SUPERVISOR RUN
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | ======================================================================
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | Drop Zone: /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/DROP_ZONE
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER | Discovered 1 batch(es) in drop zone. Processing queue in FIFO order (oldest to newest):
-2026-10-15 12:09:20 | INFO     | BICC_INTAKE_CONTROLLER |   [1/1] Batch ID: 000000011, Extract TS: 20261015_120011, Files: 2
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | Connected successfully to Teradata Vantage for schema introspection.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | [ERP_MSH_INVOICE_HEADER] Schema is identical (225 columns). No DDL modification needed.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | [ERP_MSH_USER] Schema is identical (85 columns). No DDL modification needed.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | Vaulted original manifest 'MANIFEST-20261015_120011.MF' and intake receipt to '/sg/.../DROP_ZONE/ARCHIVE/20261015_120011_000000011'.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | Created standardized manifest: '/sg/.../LANDING_ZONE/MANIFEST_ORACLE_FUSION_20261015_120011_000000011.MF' with 2 file entries.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | Transferred 2 data files to Orchestrator landing zone.
-2026-10-15 12:09:21 | INFO     | BICC_INTAKE_CONTROLLER | Delegating execution of batch 000000011 to DATA_INGESTION_ORCHESTRATOR...
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | Initialized BICC Intake Controller log file: '/sg/local/sid/home/Dsidadm/DATA_LOADER/LOGS/ORACLE_FUSION/LOG_FEEDER_ORACLE_FUSION_20261016_173927.log'
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | ======================================================================
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | STARTING BICC INTAKE CONTROLLER - SUPERVISOR RUN (Source: ORACLE_FUSION)
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | ======================================================================
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | Drop Zone: /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/DROP_ZONE/ORACLE_FUSION
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER | Discovered 1 batch(es) in drop zone. Processing queue in FIFO order (oldest to newest):
+2026-10-16 17:39:27 | INFO     | BICC_INTAKE_CONTROLLER |   [1/1] Batch ID: 9001, Extract TS: 20261016_100000, Files: 1
+2026-10-16 17:39:28 | INFO     | BICC_INTAKE_CONTROLLER | Connected successfully to Teradata Vantage for schema introspection.
+2026-10-16 17:39:28 | INFO     | BICC_INTAKE_CONTROLLER | [ERP_USER] Schema is identical (85 columns). No DDL modification needed.
+2026-10-16 17:39:29 | INFO     | BICC_INTAKE_CONTROLLER | Vaulted original manifest 'MANIFEST_ORACLE_FUSION_20261016_100000_9001.MF' and intake receipt to '/sg/.../DATA/ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_9001_20261016_100000/RAW'.
+2026-10-16 17:39:29 | INFO     | BICC_INTAKE_CONTROLLER | Created standardized manifest: '/sg/.../DATA/LANDING_ZONE/ORACLE_FUSION/MANIFEST_ORACLE_FUSION_20261016_100000_9001.MF' with 1 file entries.
+2026-10-16 17:39:29 | INFO     | BICC_INTAKE_CONTROLLER | Transferred 1 data files to Orchestrator landing zone.
+2026-10-16 17:39:29 | INFO     | BICC_INTAKE_CONTROLLER | Delegating execution of batch 9001 to DATA_INGESTION_ORCHESTRATOR...
 ... [Orchestrator live stream] ...
-2026-10-15 12:09:31 | INFO     | BICC_INTAKE_CONTROLLER | [SUCCESS] Batch 000000011 ingested, verified and transformed successfully.
-2026-10-15 12:09:31 | INFO     | BICC_INTAKE_CONTROLLER | ALL 1 BATCHES PROCESSED WITH 100% SUCCESS!
+2026-10-16 17:39:56 | INFO     | BICC_INTAKE_CONTROLLER | [SUCCESS] Batch 9001 ingested, verified and transformed successfully.
+2026-10-16 17:39:56 | INFO     | BICC_INTAKE_CONTROLLER | ALL 1 BATCHES PROCESSED WITH 100% SUCCESS!
 ```
 
 ---

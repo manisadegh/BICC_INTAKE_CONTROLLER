@@ -76,10 +76,10 @@ classDiagram
 - **Imports**: `argparse`, `json`, `logging`, `os`, `sys`, `datetime`, `typing`, `teradatasql`, local `lib.*`.
 
 #### Functions in `feeder.py`:
-1. `setup_logger(logs_dir: str) -> logging.Logger`
-   - **Signature**: `setup_logger(logs_dir: str) -> logging.Logger`
-   - **Description**: Configures a dual-handler logger (`stdout` stream and timestamped file `feeder_<YYYYMMDD_HHMMSS>.log`). Sets level to `INFO` with standardized timestamp format.
-   - **Side Effects**: Creates directory `logs_dir` if absent; opens write file handle.
+1. `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
+   - **Signature**: `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
+   - **Description**: Configures a dual-handler logger (`stdout` stream and timestamped file `LOG_FEEDER_<SOURCE>_<YYYYMMDD_HHMMSS>.log` inside `logs_dir/<SOURCE>/`). Sets level to `INFO` with standardized timestamp format.
+   - **Side Effects**: Creates directory `logs_dir/<SOURCE>/` if absent; opens write file handle.
 
 2. `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
    - **Signature**: `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
@@ -97,7 +97,7 @@ classDiagram
 
 5. `main() -> None`
    - **Signature**: `main()`
-   - **Description**: Parses CLI args, loads `config.json`, initializes logger, checks for in-flight recovery in `LOADING_ZONE`, scans `DROP_ZONE`, iterates over FIFO queue, triggers stability checks, invokes Schema Guard, vaults raw manifests, creates standardized manifest, transfers payload files to `LANDING_ZONE`, invokes Orchestrator, and evaluates return code under `FAIL_STOP`.
+   - **Description**: Parses CLI args, loads `config.json`, initializes logger, checks for in-flight recovery in `LOADING_ZONE/<SOURCE>`, scans `DROP_ZONE/<SOURCE>`, iterates over FIFO queue, triggers stability checks, invokes Schema Guard, vaults raw manifests into Batch Capsule `RAW/`, creates standardized manifest, transfers payload files to `LANDING_ZONE/<SOURCE>`, invokes Orchestrator, and evaluates return code under `FAIL_STOP`.
 
 ---
 
@@ -116,7 +116,7 @@ classDiagram
    - **Description**: Parses content of raw manifest file. Handles commas, semicolons, and tabs. Skips comment lines (`#`), headers (`filename`), and configuration keys (`key=val`).
 
 4. `scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> List[Dict]`
-   - **Description**: Discovers all `*.MF` files in `DROP_ZONE`. Reads declared files, refines batch ID and timestamps, and returns a list of batch metadata dictionaries.
+   - **Description**: Discovers all `*.MF` files in the source partitioned drop zone `DROP_ZONE/<SOURCE>`. Files placed at the root of `DROP_ZONE/` are strictly ignored to prevent cross-source contamination. Reads declared files, refines batch ID and timestamps, and returns a list of batch metadata dictionaries.
 
 5. `sort_batches_fifo(batches: List[Dict]) -> List[Dict]`
    - **Description**: Sorts batch dictionaries by `sort_key` in strict ascending chronological order.
@@ -173,10 +173,10 @@ classDiagram
    - **Description**: Generates `MANIFEST_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.MF` containing CSV header `filename,checksum`.
 
 3. `vault_raw_manifest(raw_manifest_path: str, archive_base_dir: str, source: str, extract_timestamp: str, batch_id: str, receipt_payload: List[Dict]) -> str`
-   - **Description**: Moves original BICC manifest into `<archive_base_dir>/<TS>_<BATCH_ID>/` and writes `intake_receipt.json`.
+   - **Description**: Vaults original BICC manifest into Batch Capsule `<archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/` and writes canonical `RECEIPT_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`.
 
 4. `transfer_batch_to_landing_zone(drop_zone_dir: str, landing_zone_dir: str, data_files: List[str], standardized_manifest_path: Optional[str] = None)`
-   - **Description**: Moves all manifested data payload files from `DROP_ZONE` into `LANDING_ZONE`.
+   - **Description**: Moves all manifested data payload files from `DROP_ZONE/<SOURCE>` into `LANDING_ZONE/<SOURCE>`.
 
 ---
 

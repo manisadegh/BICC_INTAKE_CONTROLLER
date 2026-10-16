@@ -47,15 +47,15 @@ mindmap
 ```
 
 ### What the Controller Does:
-- **Discovers** incoming manifest files matching standard or legacy BICC naming patterns in `DATA/DROP_ZONE`.
+- **Discovers** incoming manifest files matching standard or legacy BICC naming patterns in `DATA/DROP_ZONE/<SOURCE>/`. Any unpartitioned files at the root of `DROP_ZONE/` are strictly ignored.
 - **Extracts** batch IDs and export timestamps from manifest names or declared payload names.
 - **Enforces FIFO chronology**: Organizes multi-batch queues in ascending chronological order (`oldest -> newest`).
 - **Validates payload stability**: Ensures all manifested files exist, are $>0$ bytes, and have static file sizes over a configurable window.
 - **Performs zero-disk schema inspection**: Reads header lines directly from `.zip` or `.gz` in memory.
 - **Supervises Teradata staging schemas**: Compares CSV headers against `DBC.ColumnsV`. If columns drifted or table is missing, executes `DROP TABLE` and creates a `NOPI` table with all payload columns as `VARCHAR(4000) UNICODE NOT CASESPECIFIC`.
-- **Vaults raw manifests**: Stores the original BICC manifest and an `intake_receipt.json` audit document in `DROP_ZONE/ARCHIVE/<TS>_<BATCH_ID>/`.
+- **Vaults raw manifests**: Stores the original BICC manifest and audit documents (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`) inside the Batch Capsule in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`.
 - **Synthesizes standardized manifests**: Generates `MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF` containing MD5 checksums.
-- **Atomically transfers files**: Moves data payloads to `DATA/LANDING_ZONE`.
+- **Atomically transfers files**: Moves data payloads to `DATA/LANDING_ZONE/<SOURCE>/`.
 - **Delegates execution**: Launches `DATA_INGESTION_ORCHESTRATOR` and halts immediately on non-zero exit code (`FAIL_STOP`).
 
 ### What the Controller Does NOT Do:
@@ -72,11 +72,11 @@ The following sequence diagram illustrates the lifecycle of a batch passing thro
 ```mermaid
 sequenceDiagram
     autonumber
-    participant DropZone as DATA/DROP_ZONE
+    participant DropZone as DATA/DROP_ZONE/<SOURCE>
     participant Feeder as feeder.py
     participant TD as Teradata Vantage (DBC.ColumnsV)
-    participant Archive as DROP_ZONE/ARCHIVE
-    participant LandingZone as DATA/LANDING_ZONE
+    participant Archive as Batch Capsule RAW/
+    participant LandingZone as DATA/LANDING_ZONE/<SOURCE>
     participant Orch as DATA_INGESTION_ORCHESTRATOR
 
     Note over Feeder: In-Flight Crash Check (LOADING_ZONE)
@@ -184,11 +184,11 @@ The controller enforces a strict **`FAIL_STOP`** contract:
 - Remaining batches in `DROP_ZONE` are left untouched to prevent newer data from being loaded ahead of failed older data.
 
 ### 6.2 Raw Manifest Vaulting & Audit Trail
-Before files are moved to `LANDING_ZONE`, the raw manifest is preserved permanently in:
+Before files are moved to `LANDING_ZONE/<SOURCE>/`, the raw manifest is preserved permanently in the Batch Capsule:
 ```
-DATA/DROP_ZONE/ARCHIVE/<EXTRACT_TIMESTAMP>_<BATCH_ID>/
+DATA/ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<EXTRACT_TIMESTAMP>/RAW/
 ```
-Along with an `intake_receipt.json` audit document recording:
+Along with a canonical intake receipt audit document `RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json` (plus legacy `intake_receipt.json`) recording:
 - Extraction timestamp, Batch ID, and Source system.
 - Intake timestamp.
 - File sizes in bytes.

@@ -43,14 +43,14 @@ Comprehensive operational, technical, and testing manuals are available in the [
 
 ## Key Capabilities
 
-- **Multi-Batch Drop Zone Feeder**: Ingests asynchronous batches from `DROP_ZONE` containing unmanifested uploads or multiple simultaneous batches.
+- **Multi-Batch Drop Zone Feeder**: Ingests asynchronous batches from `DATA/DROP_ZONE/<SOURCE>/` (e.g. `DATA/DROP_ZONE/ORACLE_FUSION/`). Upstream systems must deposit files into their designated source sub-directory; files placed at the root of `DROP_ZONE/` are strictly ignored to prevent cross-source contamination.
 - **Strict FIFO Execution Queue**: Automatically sorts discovered batches in ascending chronological order (oldest extract timestamp first) to maintain state and lineage consistency.
 - **Upload Settling Sentry**: Confirms all manifested data files exist, are $>0$ bytes, and have stable file sizes before processing, avoiding partial ingestion during SFTP or cloud transfers.
 - **Automated Schema Drift Resolution**: Compares CSV header columns with Teradata `DBC.ColumnsV`. Upon schema evolution or missing tables, automatically creates or updates Teradata staging tables in **`NO PRIMARY INDEX` (`NOPI`)** with all payload columns as **`VARCHAR(4000) UNICODE NOT CASESPECIFIC`**.
 - **Audit Columns Auto-Injection**: Appends `INFA_LAST_REPLICATED TIMESTAMP(0)` and `INFA_BATCH_ID VARCHAR(100)` to all target staging definitions.
-- **Cryptographic Manifest Factory**: Computes MD5 checksums across all data files and synthesizes standard `MANIFEST_ORACLE_FUSION_<TIMESTAMP>_<BATCH_ID>.MF` manifests for the Orchestrator.
+- **Cryptographic Manifest Factory**: Computes MD5 checksums across all data files and synthesizes standard `MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF` manifests for the Orchestrator.
 - **Regulatory Manifest Vault**: Preserves pristine raw BICC manifests in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/` alongside a detailed canonical JSON intake audit receipt (`RECEIPT_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`).
-- **Source-Specific Post-Tasks**: Configures source hooks (`post_ingestion_tasks`) automatically dumped to `POST_TASKS_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` (with legacy fallback) and forwarded to the Orchestrator via `--post-tasks-file`.
+- **Source-Specific Post-Tasks**: Configures source hooks (`post_ingestion_tasks`) automatically dumped to `LOGS/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/POST_TASKS_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` (with legacy fallback) and forwarded to the Orchestrator via `--post-tasks-file`.
 - **Single-Flight Concurrency & Active Polling**: Implements process locking (`.feeder_<source>.pid`) with active polling loop on active PIDs, avoiding collisions and Teradata 2652 errors.
 - **Hybrid Decoupling Support**: Supports `--skip-post-tasks` CLI flag to bypass post-load models during maintenance or historical re-inits.
 - **FAIL_STOP Barrier**: Halts immediately on the first sign of worker, TPT, or downstream transformation failure, preventing cascade corruption.
@@ -62,7 +62,7 @@ Comprehensive operational, technical, and testing manuals are available in the [
 ```mermaid
 flowchart TD
     subgraph INTAKE["1. Drop Zone Intake"]
-        BICC[Oracle Fusion BICC Export] --> DZ["DATA/DROP_ZONE"]
+        BICC[Oracle Fusion BICC Export] --> DZ["DATA/DROP_ZONE/&lt;SOURCE&gt;/"]
         DZ --> SCAN[Scanner: Discover All Manifests]
         SCAN --> FIFO[Sort Queue: FIFO Chronological Order]
     end
@@ -76,8 +76,8 @@ flowchart TD
         DDL -- No --> AUTODDL[Auto-DDL: DROP & CREATE NOPI VARCHAR 4000]
         DDL -- Yes --> MANIFEST[Manifest Factory: Calculate MD5 Checksums]
         AUTODDL --> MANIFEST
-        MANIFEST --> VAULT[Vault Raw Manifest + Write intake_receipt.json]
-        VAULT --> HANDOFF[Move Batch Payloads to LANDING_ZONE]
+        MANIFEST --> VAULT["Vault Raw Manifest + Write RECEIPT into Batch Capsule RAW/"]
+        VAULT --> HANDOFF["Move Batch Payloads to LANDING_ZONE/&lt;SOURCE&gt;/"]
     end
 
     subgraph EXECUTION["3. Downstream Ingestion"]

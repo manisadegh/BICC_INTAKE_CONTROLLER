@@ -44,11 +44,11 @@ To run tests without impacting production or shared staging environments, use an
 ```bash
 # Create isolated test sandbox
 export SANDBOX_DIR="/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST"
-mkdir -p "${SANDBOX_DIR}/DATA/DROP_ZONE/ARCHIVE"
-mkdir -p "${SANDBOX_DIR}/DATA/LANDING_ZONE"
-mkdir -p "${SANDBOX_DIR}/DATA/LOADING_ZONE"
-mkdir -p "${SANDBOX_DIR}/DATA/ARCHIVE_ZONE"
-mkdir -p "${SANDBOX_DIR}/LOGS"
+mkdir -p "${SANDBOX_DIR}/DATA/DROP_ZONE/ORACLE_FUSION"
+mkdir -p "${SANDBOX_DIR}/DATA/LANDING_ZONE/ORACLE_FUSION"
+mkdir -p "${SANDBOX_DIR}/DATA/LOADING_ZONE/ORACLE_FUSION"
+mkdir -p "${SANDBOX_DIR}/DATA/ARCHIVE_ZONE/ORACLE_FUSION"
+mkdir -p "${SANDBOX_DIR}/LOGS/ORACLE_FUSION"
 mkdir -p "${SANDBOX_DIR}/CONFIG"
 
 # Copy entity mapping
@@ -60,7 +60,7 @@ cp /sg/local/sid/home/Dsidadm/DATA_LOADER/CONFIG/entity_mapping.csv "${SANDBOX_D
 {
   "feeder": {
     "drop_zone": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE",
-    "raw_manifest_archive": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/ARCHIVE",
+    "raw_manifest_archive": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/ARCHIVE_ZONE",
     "logs_dir": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS",
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
@@ -135,9 +135,9 @@ The following test suite reflects empirical validation performed across test bat
   grep "PROCESSING BATCH 2/2: ID=000000015" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
   ```
 - **Filesystem Verification**:
-  - `DROP_ZONE/ARCHIVE/20261015_120014_000000014/intake_receipt.json` exists.
-  - `DROP_ZONE/ARCHIVE/20261015_120015_000000015/intake_receipt.json` exists.
-  - `DROP_ZONE` is empty at completion.
+  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000014_20261015_120014/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json` (and `intake_receipt.json`).
+  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000015_20261015_120015/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json` (and `intake_receipt.json`).
+  - `DROP_ZONE/ORACLE_FUSION` is empty at completion.
 
 ---
 
