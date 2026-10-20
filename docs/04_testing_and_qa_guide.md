@@ -15,21 +15,27 @@ flowchart LR
         T5["Unstable / In-Flight Upload"]
         T6["Zero-Byte / Truncated File"]
         T7["Upstream Schema Drift"]
+        T8["In-Flight Crash Recovery"]
+        T9["Concurrent Feeder Race"]
     end
 
     subgraph Controller["BICC Intake Controller"]
+        Lock["PID Concurrency Guard"]
         Sentry["Sentry & Scanner"]
         Guard["Schema Guard"]
         Vault["Vault & Transfer"]
+        Bridge["Orchestrator Bridge"]
     end
 
     subgraph ExpectedOutcomes["Verified Assertions"]
         A1["FIFO Chronological Queue Execution"]
         A2["Settling Sentry Abort (RC 1)"]
         A3["Auto-DDL Recreation (NOPI)"]
-        A4["Pristine Vault + intake_receipt.json"]
+        A4["Pristine Vault + Canonical Receipt"]
         A5["Standardized Manifest in LANDING_ZONE"]
         A6["FAIL_STOP Halt on Downstream Error"]
+        A7["Active Wait & Collision Avoidance"]
+        A8["In-Flight Batch Auto-Resumption"]
     end
 
     Inputs --> Controller --> ExpectedOutcomes
@@ -65,7 +71,11 @@ cp /sg/local/sid/home/Dsidadm/DATA_LOADER/CONFIG/entity_mapping.csv "${SANDBOX_D
     "batch_selection_policy": "FIFO_ALL",
     "on_batch_failure": "abort",
     "file_stability_window_seconds": 2,
-    "source_system_code": "ORACLE_FUSION"
+    "source_system_code": "ORACLE_FUSION",
+    "concurrency": {
+      "poll_interval_seconds": 2,
+      "lock_timeout_seconds": 30
+    }
   },
   "schema_guard": {
     "auto_migrate_ddl": true,
@@ -120,9 +130,8 @@ The following test suite reflects empirical validation performed across test bat
 - **Objective**: Verify that when multiple batches are deposited concurrently, the controller sorts them chronologically and processes them sequentially without violating single-batch boundaries.
 - **Setup**:
   ```bash
-  # Stage both batches simultaneously into DROP_ZONE
   cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_14_15_SIMULTANEOUS/* \
-     /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/
+     /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/ORACLE_FUSION/
   ```
 - **Execution**:
   ```bash
@@ -130,9 +139,9 @@ The following test suite reflects empirical validation performed across test bat
   ```
 - **Log Verification**:
   ```bash
-  grep "Discovered 2 batch(es) in drop zone" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
-  grep "PROCESSING BATCH 1/2: ID=000000014" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
-  grep "PROCESSING BATCH 2/2: ID=000000015" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
+  grep "Discovered 2 batch(es) in drop zone" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
+  grep "PROCESSING BATCH 1/2: ID=000000014" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
+  grep "PROCESSING BATCH 2/2: ID=000000015" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
   ```
 - **Filesystem Verification**:
   - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000014_20261015_120014/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json` (and `intake_receipt.json`).
@@ -160,8 +169,8 @@ The following test suite reflects empirical validation performed across test bat
   ```
 - **Log Verification**:
   ```bash
-  grep "Schema drift detected!" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
-  grep "Successfully created NOPI staging table with 4 payload columns" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/feeder_*.log
+  grep "Schema drift detected!" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
+  grep "Successfully created NOPI staging table with 4 payload columns" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
   ```
 - **Database Assertion**:
   ```sql
@@ -170,6 +179,47 @@ The following test suite reflects empirical validation performed across test bat
   ORDER BY ColumnId;
   ```
   Columns returned: `USER_ID`, `USER_NAME`, `EMAIL_ADDRESS`, `STATUS`, `INFA_LAST_REPLICATED`, `INFA_BATCH_ID`.
+
+---
+
+### Test Case: TC-FEED-08 (In-Flight Batch Crash Recovery)
+- **Objective**: Verify that when an uncompleted batch exists in `LOADING_ZONE/<SOURCE>` from a crashed execution, the feeder immediately resumes the Orchestrator before scanning new files from `DROP_ZONE`.
+- **Setup**:
+  1. Place an uncompleted standardized manifest and data files in `DATA/LOADING_ZONE/ORACLE_FUSION/`:
+     ```bash
+     cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_INFLIGHT/* \
+        /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/LOADING_ZONE/ORACLE_FUSION/
+     ```
+  2. Deposit a new batch in `DATA/DROP_ZONE/ORACLE_FUSION/`.
+- **Execution**:
+  ```bash
+  python3 feeder.py --config /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json
+  ```
+- **Assertions**:
+  - The controller logs: `In-flight batch detected in LOADING_ZONE (...). Resuming Orchestrator delegation (Crash Recovery)...`
+  - The in-flight batch is loaded into Teradata and moved to `ARCHIVE_ZONE/ORACLE_FUSION/`.
+  - Only after recovery completes does the controller process the new batch from `DROP_ZONE/ORACLE_FUSION/`.
+
+---
+
+### Test Case: TC-FEED-09 (Concurrency Guard & Active Polling Wait)
+- **Objective**: Verify that two feeder instances launched simultaneously on the same source do not corrupt state or trigger Teradata Error 2652.
+- **Setup & Execution**:
+  ```bash
+  # Launch first instance in background
+  python3 feeder.py --config test_config.json &
+  PID_1=$!
+  sleep 1
+
+  # Launch second instance
+  python3 feeder.py --config test_config.json
+  wait $PID_1
+  ```
+- **Assertions**:
+  - Instance 2 detects `.feeder_ORACLE_FUSION.pid` with PID of Instance 1.
+  - Instance 2 logs: `Another BICC Intake Controller is currently active (PID ...). Entering active waiting loop...`
+  - Instance 2 polls every 2 seconds until Instance 1 finishes, then resumes without errors.
+  - No Teradata table lock collisions occur.
 
 ---
 
@@ -192,7 +242,7 @@ echo "[PASS] Empty drop zone handled gracefully."
 
 # Test 2: Multi-Batch Ingestion
 cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_12/* \
-   /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/
+   /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/ORACLE_FUSION/
 python3 "${FEEDER_DIR}/feeder.py" --config "${CONFIG_FILE}"
 echo "[PASS] Batch 12 processed and archived."
 

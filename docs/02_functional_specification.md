@@ -15,8 +15,9 @@ Upstream cloud extracts often arrive with variable delays, partial multi-file up
 - Ingesting partial or in-flight uploads.
 - Corrupting staging tables due to unnotified ERP schema alterations.
 - Inverting batch chronology (processing a newer batch before an older batch), violating temporal consistency.
+- Colliding on Teradata FastLoad/MultiLoad sessions (Error 2652) due to concurrent executions on the same tables.
 
-The BICC Intake Controller establishes deterministic order, transactional stability, and automated schema adaptation before files reach processing stages.
+The BICC Intake Controller establishes deterministic order, single-flight mutual exclusion, transactional stability, and automated schema adaptation before files reach processing stages.
 
 ---
 
@@ -25,8 +26,18 @@ The BICC Intake Controller establishes deterministic order, transactional stabil
 ```mermaid
 mindmap
   root((BICC_INTAKE_CONTROLLER))
+    Process Concurrency
+      Lock File .feeder_SOURCE.pid
+      Active PID Polling Wait
+      Teradata BATCH_RUNS Sentry
+      Loading Zone .orchestrator.pid
+    In-Flight Recovery
+      Detects LOADING_ZONE .MF
+      Verifies Dead Orchestrator PID
+      Resumes Subprocess Immediately
+      Preserves In-Flight Post-Tasks
     Ingress Governance
-      Scans DROP_ZONE
+      Scans DROP_ZONE/<SOURCE>
       Parses Manifests & Payloads
       Enforces FIFO Chronology
       Settling Window Sentry
@@ -43,19 +54,24 @@ mindmap
     Delegation
       Subprocess Invocation
       Real-Time Log Stream
+      Source Post-Tasks Bridge
       FAIL_STOP Pipeline Halt
 ```
 
 ### What the Controller Does:
+- **Enforces Process Mutual Exclusion**: Manages `.feeder_<SOURCE>.pid` inside `DATA/DROP_ZONE/<SOURCE>/` to prevent simultaneous feeder executions on the same source partition.
+- **Guards Against Active Orchestration Collisions**: Queries Teradata Vantage `${TDENV}SIDFINTCH.BATCH_RUNS` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid` to ensure no orchestrator or TPT job is actively loading data before touching ingress sas.
+- **Executes In-Flight Crash Recovery**: Resumes crashed batches left in `LOADING_ZONE/<SOURCE>` before opening new files from `DROP_ZONE/<SOURCE>`.
 - **Discovers** incoming manifest files matching standard or legacy BICC naming patterns in `DATA/DROP_ZONE/<SOURCE>/`. Any unpartitioned files at the root of `DROP_ZONE/` are strictly ignored.
 - **Extracts** batch IDs and export timestamps from manifest names or declared payload names.
 - **Enforces FIFO chronology**: Organizes multi-batch queues in ascending chronological order (`oldest -> newest`).
-- **Validates payload stability**: Ensures all manifested files exist, are $>0$ bytes, and have static file sizes over a configurable window.
+- **Validates payload stability**: Ensures all manifested files exist, are $>0$ bytes, and have static file sizes over a configurable settling window.
 - **Performs zero-disk schema inspection**: Reads header lines directly from `.zip` or `.gz` in memory.
 - **Supervises Teradata staging schemas**: Compares CSV headers against `DBC.ColumnsV`. If columns drifted or table is missing, executes `DROP TABLE` and creates a `NOPI` table with all payload columns as `VARCHAR(4000) UNICODE NOT CASESPECIFIC`.
 - **Vaults raw manifests**: Stores the original BICC manifest and audit documents (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`) inside the Batch Capsule in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`.
 - **Synthesizes standardized manifests**: Generates `MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF` containing MD5 checksums.
 - **Atomically transfers files**: Moves data payloads to `DATA/LANDING_ZONE/<SOURCE>/`.
+- **Bridges Source Post-Tasks**: Dumps source-specific post-ingestion tasks to `POST_TASKS_<SOURCE>_<TS>_<BATCH_ID>.json` and delegates to Orchestrator via `--post-tasks-file`.
 - **Delegates execution**: Launches `DATA_INGESTION_ORCHESTRATOR` and halts immediately on non-zero exit code (`FAIL_STOP`).
 
 ### What the Controller Does NOT Do:
@@ -67,26 +83,55 @@ mindmap
 
 ## 3. End-to-End Processing Lifecycle & Sequence
 
-The following sequence diagram illustrates the lifecycle of a batch passing through the controller:
+The following sequence diagram illustrates the complete supervisor lifecycle including concurrency guards, pre-flight checks, schema synchronization, and delegation:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant DropZone as DATA/DROP_ZONE/<SOURCE>
+    participant Lock as Lock (.feeder_<SRC>.pid)
     participant Feeder as feeder.py
-    participant TD as Teradata Vantage (DBC.ColumnsV)
+    participant BATCH_RUNS as Teradata BATCH_RUNS
+    participant LoadingZone as DATA/LOADING_ZONE/<SRC>
+    participant DropZone as DATA/DROP_ZONE/<SRC>
+    participant TD as Teradata (DBC.ColumnsV)
     participant Archive as Batch Capsule RAW/
-    participant LandingZone as DATA/LANDING_ZONE/<SOURCE>
+    participant LandingZone as DATA/LANDING_ZONE/<SRC>
     participant Orch as DATA_INGESTION_ORCHESTRATOR
 
-    Note over Feeder: In-Flight Crash Check (LOADING_ZONE)
-    Feeder->>DropZone: Scan for manifest files (*.MF)
-    DropZone-->>Feeder: Return list of manifests
-    Feeder->>Feeder: Sort discovered batches in FIFO order
+    Note over Feeder,Lock: 1. Feeder Concurrency Guard
+    Feeder->>Lock: Check .feeder_<SOURCE>.pid
+    alt PID Active
+        Feeder->>Feeder: Active polling wait loop until PID exits
+    else PID Dead or None
+        Feeder->>Lock: Acquire lock (write os.getpid())
+    end
+
+    Note over Feeder,BATCH_RUNS: 2. Active Orchestration Sentry
+    Feeder->>BATCH_RUNS: SELECT BATCH_ID, PROCESS_PID WHERE STATUS = 'RUNNING'
+    alt Active Batch Running & PID Alive
+        Feeder->>Feeder: Active polling wait loop until batch finishes
+    end
+
+    Feeder->>LoadingZone: Check .orchestrator.pid
+    alt Orchestrator PID Alive
+        Feeder->>Feeder: Active polling wait loop until orchestrator finishes
+    end
+
+    Note over Feeder,LoadingZone: 3. In-Flight Batch Recovery Check
+    Feeder->>LoadingZone: Scan for *.MF
+    alt In-Flight Manifest Found (Crash Recovery)
+        Feeder->>Orch: Invoke orchestrator.py (Resume In-Flight Batch)
+        Orch-->>Feeder: Stream stdout/stderr (Exit RC 0)
+    end
+
+    Note over Feeder,DropZone: 4. Normal FIFO Queue Ingress
+    Feeder->>DropZone: Scan for manifests (*.MF)
+    DropZone-->>Feeder: Return manifests list
+    Feeder->>Feeder: Sort discovered batches in FIFO order (oldest first)
     
     loop For each batch in FIFO Queue
         Feeder->>DropZone: Check file existence and stability window
-        Feeder->>DropZone: Stream line 1 of payload in memory (ZIP/CSV)
+        Feeder->>DropZone: Stream line 1 of payload in memory (ZIP/GZ/CSV)
         Feeder->>TD: Query DBC.ColumnsV for target table
         alt Table missing or columns drifted
             Feeder->>TD: DROP TABLE & CREATE NOPI VARCHAR(4000)
@@ -94,17 +139,19 @@ sequenceDiagram
             Note over Feeder,TD: Schema matched (no DDL needed)
         end
         Feeder->>DropZone: Compute MD5 checksums of data files
-        Feeder->>Archive: Vault original manifest + intake_receipt.json
+        Feeder->>Archive: Vault original manifest + RECEIPT_<SOURCE>_<TS>_<ID>.json
         Feeder->>LandingZone: Create MANIFEST_<SOURCE>_<TS>_<ID>.MF
         Feeder->>LandingZone: Move data files from DROP_ZONE to LANDING_ZONE
-        Feeder->>Orch: Invoke orchestrator.py (subprocess)
-        Orch-->>Feeder: Stream stdout/stderr (real-time)
+        Feeder->>Orch: Invoke orchestrator.py (--source <SOURCE> --post-tasks-file <FILE>)
+        Orch-->>Feeder: Stream stdout/stderr in real time
         alt Return Code == 0
             Note over Feeder: Batch completed successfully
         else Return Code != 0
-            Note over Feeder: FAIL_STOP triggered -> Abort Feeder
+            Note over Feeder: FAIL_STOP triggered -> Abort Feeder Immediately
         end
     end
+
+    Feeder->>Lock: Release lock on exit (atexit)
 ```
 
 ---
@@ -183,7 +230,7 @@ The controller enforces a strict **`FAIL_STOP`** contract:
 - If the downstream Orchestrator exits with code $>0$, the controller terminates immediately with exit code `1`.
 - Remaining batches in `DROP_ZONE` are left untouched to prevent newer data from being loaded ahead of failed older data.
 
-### 6.2 Raw Manifest Vaulting & Audit Trail
+### 6.2 Raw Manifest Vaulting & Canonical Receipts
 Before files are moved to `LANDING_ZONE/<SOURCE>/`, the raw manifest is preserved permanently in the Batch Capsule:
 ```
 DATA/ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<EXTRACT_TIMESTAMP>/RAW/
@@ -194,3 +241,20 @@ Along with a canonical intake receipt audit document `RECEIPT_<SOURCE>_<EXTRACT_
 - File sizes in bytes.
 - Cryptographic MD5 checksums.
 - Target staging table and schema action (`IDENTICAL`, `CREATED`, or `RECREATED`).
+
+### 6.3 Single-Flight Process Concurrency & Active Polling Loop
+- Feeder uses `.feeder_<SOURCE>.pid` inside `DROP_ZONE/<SOURCE>/` to guarantee that only one controller executes per source partition.
+- If another process PID is active, the feeder does not crash; it enters an active polling wait loop (`poll_interval_seconds: 5`), logging progress until the running instance completes.
+- Stale locks from terminated processes are detected and cleared automatically.
+- Upon normal or abnormal termination, an `atexit` cleanup handler unlinks the PID lock file.
+
+### 6.4 Active Ingestion Sentry & In-Flight Crash Recovery
+- **Active Orchestrator Guard**: Before transferring any batch to `LANDING_ZONE/<SOURCE>`, the feeder checks if an orchestrator is actively running by inspecting `${TDENV}SIDFINTCH.BATCH_RUNS` and `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. If an active PID is alive, it waits until completion, preventing Teradata 2652 table lock errors.
+- **Crash Recovery**: If an uncompleted batch (`*.MF`) exists in `LOADING_ZONE/<SOURCE>` and the associated orchestrator PID is dead, the feeder automatically initiates crash recovery:
+  1. It bypasses drop zone scanning.
+  2. It generates `post_tasks_<source>_inflight.json` if source post-tasks exist.
+  3. It delegates directly to `orchestrator.py` to complete ingestion, verification, post-tasks, and archiving.
+  4. Only after the in-flight batch is fully archived does the feeder return to scan `DROP_ZONE/<SOURCE>`.
+
+### 6.5 Multi-Source Partition Isolation
+All storage tiers (`DROP_ZONE`, `LANDING_ZONE`, `LOADING_ZONE`, `ARCHIVE_ZONE`, and `LOGS`) are partitioned by source system code. Simultaneous executions for different sources operate in total physical and logical isolation without mutual interference.

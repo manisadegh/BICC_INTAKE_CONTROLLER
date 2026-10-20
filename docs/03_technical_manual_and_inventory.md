@@ -1,103 +1,71 @@
-# BICC_INTAKE_CONTROLLER - Technical Manual & Codebase Inventory
+# BICC_INTAKE_CONTROLLER - Technical Manual & Function Inventory
 
-## 1. Internal Architecture & Software Design
+## 1. System Context & Architecture
 
-The **BICC_INTAKE_CONTROLLER** is structured as a modular Python package adhering to strict separation of concerns:
+The **BICC_INTAKE_CONTROLLER** (`feeder.py`) is deployed on the Linux application server at:
+```
+/sg/local/sid/home/Dsidadm/DATA_LOADER/PROCESSING_TOOLS/BICC_INTAKE_CONTROLLER/
+```
+It supervises raw asynchronous ingress, orchestrates Auto-DDL schema migrations against Teradata Vantage, and delegates verified single batches to `DATA_INGESTION_ORCHESTRATOR` via POSIX subprocess execution.
 
 ```
 BICC_INTAKE_CONTROLLER/
-├── feeder.py                     # Master Orchestration Supervisor & CLI Entrypoint
-├── config.json                   # Runtime environment configuration
-├── config_template.json          # Template configuration
-├── entity_mapping.csv            # Entity routing rules
-└── lib/                          # Specialized library modules
-    ├── scanner.py                # Manifest discovery & file stability validation
-    ├── schema_guard.py           # In-memory header streaming & DBC auto-DDL
-    ├── manifest_factory.py       # Checksum generation, vaulting & atomic move
-    └── orchestrator_bridge.py    # Subprocess execution & real-time log relay
-```
-
-```mermaid
-classDiagram
-    class FeederMain {
-        +setup_logger()
-        +get_teradata_connection()
-        +select_header_chunk_file()
-        +expand_env_vars()
-        +main()
-    }
-
-    class Scanner {
-        +MANIFEST_PATTERNS
-        +extract_batch_id_from_filenames()
-        +parse_manifest_filename()
-        +read_declared_files_from_manifest()
-        +scan_drop_zone()
-        +sort_batches_fifo()
-        +verify_payload_stability()
-    }
-
-    class SchemaGuard {
-        +clean_column_name()
-        +inspect_file_inner_extension()
-        +extract_csv_columns()
-        +load_entity_mappings()
-        +match_target_table_for_file()
-        +get_teradata_table_columns()
-        +generate_staging_ddl()
-        +recreate_staging_table()
-        +sync_entity_schema_if_drifted()
-    }
-
-    class ManifestFactory {
-        +compute_file_md5()
-        +create_standardized_manifest()
-        +vault_raw_manifest()
-        +transfer_batch_to_landing_zone()
-    }
-
-    class OrchestratorBridge {
-        +invoke_orchestrator()
-    }
-
-    FeederMain --> Scanner : Discovers & validates batches
-    FeederMain --> SchemaGuard : Compares schemas & updates DDL
-    FeederMain --> ManifestFactory : Vaults raw manifest & creates standardized MF
-    FeederMain --> OrchestratorBridge : Launches child orchestrator process
+├── feeder.py                  # Supervisor entrypoint & orchestrator bridge
+├── config.json                # Deployment configuration file
+├── config_template.json       # Clean template with defaults & concurrency
+├── entity_mapping.csv         # Signatures to Teradata target table mapping
+├── docs/                      # Comprehensive technical documentation suite
+└── lib/
+    ├── scanner.py             # Manifest discovery, FIFO sorting, stability sentry
+    ├── schema_guard.py        # In-memory header streaming & DBC.ColumnsV Auto-DDL
+    ├── manifest_factory.py    # MD5 calculation, manifest synthesis & raw vaulting
+    └── orchestrator_bridge.py # Subprocess delegation & real-time log streamer
 ```
 
 ---
 
-## 2. Complete Module & Function Inventory
+## 2. Module Inventory & Code Signatures
 
-### 2.1 Entrypoint: `feeder.py`
+### 2.1 Main Module: `feeder.py`
 - **Path**: `feeder.py`
-- **Role**: Coordinates the end-to-end execution loop over the FIFO batch queue.
-- **Imports**: `argparse`, `json`, `logging`, `os`, `sys`, `datetime`, `typing`, `teradatasql`, local `lib.*`.
+- **Role**: Command-line interface, process concurrency locking, in-flight crash recovery, and supervisor loop.
 
 #### Functions in `feeder.py`:
-1. `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
+1. `is_pid_alive(pid: int) -> bool`
+   - **Signature**: `is_pid_alive(pid: int) -> bool`
+   - **Description**: Verifies if a given OS Process ID is actively running. On POSIX/Linux, executes `os.kill(pid, 0)` and catches `ProcessLookupError` and `PermissionError`. On Windows NT, calls `kernel32.OpenProcess` with `SYNCHRONIZE` rights.
+   - **Return**: `True` if active and accessible; `False` if dead or non-existent.
+
+2. `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
    - **Signature**: `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
    - **Description**: Configures a dual-handler logger (`stdout` stream and timestamped file `LOG_FEEDER_<SOURCE>_<YYYYMMDD_HHMMSS>.log` inside `logs_dir/<SOURCE>/`). Sets level to `INFO` with standardized timestamp format.
    - **Side Effects**: Creates directory `logs_dir/<SOURCE>/` if absent; opens write file handle.
 
-2. `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
+3. `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
    - **Signature**: `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
    - **Description**: Resolves host, user, and password parameters. First checks for `key_file`/`pass_file` explicitly; then checks `~/.dbt/<user>_Key.properties` and `Pass.properties`; then falls back to `TD_PASSWORD` or explicit password. Connects via `teradatasql.connect()`.
    - **Exceptions**: `ValueError` if host or user cannot be resolved; `teradatasql.OperationalError` if logon fails.
 
-3. `select_header_chunk_file(file_list: List[str]) -> str`
+4. `select_header_chunk_file(file_list: List[str]) -> str`
    - **Signature**: `select_header_chunk_file(file_list: List[str]) -> str`
    - **Description**: Returns the file containing line 1 header in multi-chunk sets (uses deterministic alphabetical sorting `sorted(file_list)[0]`).
    - **Return**: Filename string.
 
-4. `expand_env_vars(data: Any) -> Any`
-   - **Signature**: `expand_env_vars(data)`
+5. `expand_env_vars(data: Any) -> Any`
+   - **Signature**: `expand_env_vars(data: Any) -> Any`
    - **Description**: Recursively traverses nested dictionaries, lists, and strings, resolving `$VAR` or `${VAR}` using `os.path.expandvars()`.
 
-5. `main() -> None`
-   - **Signature**: `main()`
-   - **Description**: Parses CLI args, loads `config.json`, initializes logger, checks for in-flight recovery in `LOADING_ZONE/<SOURCE>`, scans `DROP_ZONE/<SOURCE>`, iterates over FIFO queue, triggers stability checks, invokes Schema Guard, vaults raw manifests into Batch Capsule `RAW/`, creates standardized manifest, transfers payload files to `LANDING_ZONE/<SOURCE>`, invokes Orchestrator, and evaluates return code under `FAIL_STOP`.
+6. `main() -> None`
+   - **Signature**: `main() -> None`
+   - **Execution Sequence**:
+     1. **Configuration**: Parses CLI flags (`--config`, `--skip-post-tasks`, `--source`), expands environment variables.
+     2. **Partitioning**: Enforces multi-source partition routing across `DROP_ZONE`, `LANDING_ZONE`, `LOADING_ZONE`, `ARCHIVE_ZONE`, and `LOGS`.
+     3. **Feeder Concurrency Guard**: Inspects `DROP_ZONE/<SOURCE>/.feeder_<SOURCE>.pid`. If an active PID is alive, enters a polling wait loop (`poll_interval_seconds: 5`) until release or timeout (`lock_timeout_seconds: 7200`). Acquires lock and registers `atexit` cleanup.
+     4. **Active Orchestrator Guard**: Queries `${TDENV}SIDFINTCH.BATCH_RUNS WHERE STATUS = 'RUNNING'` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. Enters active polling wait loop if an active batch or PID is detected.
+     5. **In-Flight Crash Recovery**: If uncompleted `.MF` exists in `LOADING_ZONE/<SOURCE>` with dead PID, resumes Orchestrator execution immediately with in-flight post-tasks before scanning new files.
+     6. **Drop Zone Scan & FIFO Sort**: Discovers all `*.MF` in `DROP_ZONE/<SOURCE>/` and sorts batches ascending chronologically by `(timestamp, batch_id)`.
+     7. **Batch Loop**: For each batch, verifies payload stability, groups files by entity, checks `DBC.ColumnsV`, auto-recreates tables upon schema drift, computes MD5 checksums, vaults raw manifests into `ARCHIVE_ZONE/.../RAW/`, synthesizes standardized manifest, moves data files to `LANDING_ZONE/<SOURCE>`, prepares `POST_TASKS_<SOURCE>_...json`, and invokes Orchestrator.
+     8. **FAIL_STOP Barrier**: Evaluates return code. Aborts immediately (`sys.exit(rc)`) on non-zero exit.
 
 ---
 
@@ -185,8 +153,8 @@ classDiagram
 - **Role**: Subprocess delegation and unbuffered real-time log streaming.
 
 #### Functions in `lib/orchestrator_bridge.py`:
-1. `invoke_orchestrator(orchestrator_dir: str, config_file: str = "config.json", python_bin: Optional[str] = None, env: Optional[Dict] = None) -> int`
-   - **Description**: Spawns `<python_bin> orchestrator.py --config <config_file>` using `subprocess.Popen(bufsize=1, stdout=PIPE, stderr=STDOUT)`. Iterates over `readline` to relay output in real-time to the controller logger. Returns subprocess exit code.
+1. `invoke_orchestrator(orchestrator_dir: str, config_file: str = "config.json", python_bin: Optional[str] = None, env: Optional[Dict] = None, skip_post_tasks: bool = False, source: Optional[str] = None, post_tasks_file: Optional[str] = None) -> int`
+   - **Description**: Spawns `<python_bin> orchestrator.py --config <config_file> [--skip-post-tasks] [--source <source>] [--post-tasks-file <file>]` using `subprocess.Popen(bufsize=1, stdout=PIPE, stderr=STDOUT, text=True)`. Iterates over `readline` to relay output in real-time to the controller logger. Returns subprocess exit code.
 
 ---
 
@@ -202,7 +170,15 @@ WHERE DatabaseName = ?
 ORDER BY ColumnId;
 ```
 
-### 3.2 Automated NOPI Staging Table DDL Template
+### 3.2 Pre-Flight Active Batch Check against `BATCH_RUNS`
+To prevent concurrent worker collisions before touching ingress files:
+```sql
+SELECT BATCH_ID, SOURCE, START_TIME, PROCESS_PID 
+FROM {technical_database}.BATCH_RUNS 
+WHERE STATUS = 'RUNNING';
+```
+
+### 3.3 Automated NOPI Staging Table DDL Template
 ```sql
 CREATE MULTISET TABLE {target_db}.{target_table} ,NO FALLBACK ,
      NO BEFORE JOURNAL,
@@ -218,3 +194,15 @@ CREATE MULTISET TABLE {target_db}.{target_table} ,NO FALLBACK ,
      )
 NO PRIMARY INDEX;
 ```
+
+---
+
+## 4. Exit Codes & Process Termination Matrix
+
+The controller adheres to strict POSIX exit semantics:
+
+| Exit Code | Classification | Cause / Trigger | Operational Impact |
+|:---:|:---|:---|:---|
+| **`0`** | `SUCCESS / IDLE` | All batches in FIFO queue processed and archived successfully, or `DROP_ZONE/<SOURCE>` is empty. | Pipeline ready for next cycle. |
+| **`1`** | `FATAL / FAIL_STOP` | - Unhandled configuration or connection error.<br>- Payload stability check failed (file size changing / upload in progress).<br>- Unmapped entity signature in `entity_mapping.csv`.<br>- Teradata Schema Guard DDL failure.<br>- Process lock wait timeout (`lock_timeout_seconds`) exceeded.<br>- Downstream Orchestrator failed with a fatal error. | Pipeline halted immediately under `FAIL_STOP`. Ingress queue frozen to protect data lineage. |
+| **`>1`** | `SUBPROCESS_PROPAGATION` | Propagated exit code from `orchestrator.py` during in-flight recovery or batch delegation. | Controller halts with the exact return code of the child process. |
