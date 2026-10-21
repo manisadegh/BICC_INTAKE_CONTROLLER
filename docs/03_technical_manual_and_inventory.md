@@ -28,18 +28,18 @@ BICC_INTAKE_CONTROLLER/
 
 ### 2.1 CLI Entrypoint (`feeder.py`) & Service (`lib/intake_service.py`)
 - **Paths**: `feeder.py`, `lib/intake_service.py`
-- **Role**: Command-line interface (`feeder.py`) and cohesive service class (`IntakeControllerService`) backed by `COMMON/dataloader_core` (`ConfigLoader`, `ProcessLock`, `EntityMapper`, `CapsulePathResolver`, `LoggingFactory`).
+- **Role**: Command-line interface (`feeder.py`, strictly $<80$ lines) and cohesive service class (`IntakeControllerService`) inheriting from `dataloader_core.intake.BaseIntakeController` and backed by `COMMON/dataloader_core` (`ConfigLoader`, `ProcessLock`, `EntityMapper`, `CapsulePathResolver`, `LoggingFactory`, `BICCIntakePlugin`).
 
-#### Class `IntakeControllerService` (`lib/intake_service.py`):
+#### Class `IntakeControllerService(BaseIntakeController)` (`lib/intake_service.py`):
 1. `__init__(config_path: str, source_override: Optional[str] = None, skip_post_tasks: bool = False, enqueue_only: bool = False)`
-   - **Description**: Loads configuration via `dataloader_core.config.ConfigLoader`, resolves source-partitioned zone paths (`DROP_ZONE`, `LANDING_ZONE`, `LOGS`), and initializes the feeder logger via `LoggingFactory.setup_feeder_logger()`.
+   - **Description**: Loads configuration via `dataloader_core.config.ConfigLoader`, resolves source-partitioned zone paths (`DROP_ZONE`, `LANDING_ZONE`, `LOGS`), and configures `"intake_plugin": "bicc"` (or configured alternative).
    - **Database**: Zero Teradata connection or driver import.
 
 2. `acquire_concurrency_guards() -> ProcessLock`
    - **Description**: Returns a POSIX advisory lock (`dataloader_core.locking.ProcessLock`) on `DROP_ZONE/<SOURCE>/.feeder_<SOURCE>.pid` combining `fcntl.flock` with PID liveness polling (`poll_interval_seconds`, `lock_timeout_seconds`).
 
 3. `discover_and_sort_batches() -> List[Dict]`
-   - **Description**: Scans `DROP_ZONE/<SOURCE>/` via `scan_drop_zone()` and sorts batches in ascending FIFO chronological order via `sort_batches_fifo()`.
+   - **Description**: Scans `DROP_ZONE/<SOURCE>/` via plugin discovery (`BICCIntakePlugin`) and sorts batches in ascending FIFO chronological order.
 
 4. `process_single_batch(batch_info: Dict, mapper: EntityMapper) -> str`
    - **Description**:
@@ -52,7 +52,7 @@ BICC_INTAKE_CONTROLLER/
    - **Returns**: Path to the published capsule directory.
 
 5. `run(skip_post_tasks: Optional[bool] = None, enqueue_only: Optional[bool] = None) -> int`
-   - **Description**: Enqueues all batches in `DROP_ZONE` in strict FIFO order. If `enqueue_only` is False and `trigger_orchestrator` is True, invokes `DATA_INGESTION_ORCHESTRATOR` once to drain the queue. Returns exit code (`0` or `1`).
+   - **Description**: Delegates template method intake loop to `BaseIntakeController.run()`. Enqueues all batches in `DROP_ZONE` in strict FIFO order. If `enqueue_only` is False and `trigger_orchestrator` is True, invokes `DATA_INGESTION_ORCHESTRATOR` once to drain the queue. Returns exit code (`0` or `1`).
 
 ---
 

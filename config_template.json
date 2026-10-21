@@ -4,6 +4,7 @@
     "logs_dir": "../../LOGS",
     "file_stability_window_seconds": 3,
     "source_system_code": "ORACLE_FUSION",
+    "intake_plugin": "bicc",
     "entity_mapping_file": "../../CONFIG/entity_mapping.csv",
     "concurrency": {
       "poll_interval_seconds": 5,

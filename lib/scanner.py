@@ -20,6 +20,7 @@ _COMMON_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__fi
 if _COMMON_DIR not in sys.path:
     sys.path.insert(0, _COMMON_DIR)
 
+from dataloader_core.intake import BICCIntakePlugin
 from dataloader_core.manifest import (
     MANIFEST_PATTERNS,
     extract_batch_id_from_filenames,
@@ -53,46 +54,11 @@ def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") ->
     Scans the drop zone for all valid manifest files (.MF).
     Resolves true batch_id from declared payload files if omitted from manifest name.
     Returns a list of parsed batch descriptor dictionaries.
+    Delegates to `BICCIntakePlugin`.
     """
-    if not os.path.exists(drop_zone_dir):
-        logger.warning(f"Drop zone directory does not exist: '{drop_zone_dir}'")
-        return []
-
-    manifests = []
-    for f in os.listdir(drop_zone_dir):
-        if f.upper().endswith(".MF") and not f.startswith("."):
-            full_path = os.path.join(drop_zone_dir, f)
-            meta = parse_manifest_filename(f, default_source)
-            try:
-                declared_files = read_declared_files_from_manifest(full_path)
-            except Exception as e:
-                logger.error(f"Failed to read manifest '{f}': {e}")
-                continue
-
-            # Resolve true batch_id from declared payload filenames (e.g. -batch<id>-)
-            payload_batch_id = extract_batch_id_from_filenames(declared_files)
-            if payload_batch_id:
-                meta["batch_id"] = payload_batch_id
-                meta["sort_key"] = (meta["sort_key"][0], payload_batch_id)
-
-            # If extract timestamp was generated from fallback (sort_key[0] == 0.0), refine using file mtime
-            mtime = os.path.getmtime(full_path)
-            if meta["sort_key"][0] == 0.0:
-                dt_mtime = datetime.fromtimestamp(mtime)
-                meta["sort_key"] = (mtime, meta["sort_key"][1])
-                meta["extract_timestamp"] = dt_mtime.strftime("%Y%m%d_%H%M%S")
-
-            manifests.append({
-                "manifest_path": full_path,
-                "manifest_filename": f,
-                "source": meta["source"],
-                "extract_timestamp": meta["extract_timestamp"],
-                "batch_id": meta["batch_id"],
-                "sort_key": meta["sort_key"],
-                "declared_files": declared_files,
-            })
-
-    return manifests
+    plugin = BICCIntakePlugin(source_code=default_source)
+    candidates = plugin.discover_raw_batches(drop_zone_dir)
+    return [c.to_dict() for c in candidates]
 
 
 def sort_batches_fifo(batches: List[Dict]) -> List[Dict]:

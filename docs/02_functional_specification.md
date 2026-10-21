@@ -10,14 +10,14 @@ Oracle Fusion Cloud BICC exports data asynchronously in batches consisting of:
 - One or more data extract files (formatted as `.csv`, `.pecsv`, `.zip`, or `.gz`), which may be chunked into multiple parts.
 - Active Keys extracts (`.pecsv`), representing primary keys of active records for change data capture.
 
-### Problem Addressed & Phase 03 Decoupled Solution
+### Problem Addressed & Decoupled Pluggable Architecture (Phases 03 & 04)
 Upstream cloud extracts often arrive with variable delays, partial multi-file uploads, and multiple batches arriving out of order. Ingestion directly into high-speed utility loaders (like Teradata TPT) without strict ingress governance risks:
 - Ingesting partial or in-flight uploads.
 - Inverting batch chronology (processing a newer batch before an older batch), violating temporal consistency.
 - Premature DDL mutations altering tables actively in use by running ingestion pipelines.
 - Partial artifacts left in archive zones when loads fail.
 
-Under the **Phase 03 Decoupled Architecture**, `BICC_INTAKE_CONTROLLER` acts as a **pure flat-file intake producer with zero Teradata database dependency**. Target table DDL (Just-In-Time Schema Guard), state tracking (`BATCH_RUNS` / `BATCH_TASKS`), in-flight crash recovery, and post-ingestion workflows are strictly relocated to `DATA_INGESTION_ORCHESTRATOR`.
+Under the **Pluggable Intake Architecture (Phase 04)**, `BICC_INTAKE_CONTROLLER` delegates core intake mechanics to `dataloader_core.intake.BaseIntakeController` and `BICCIntakePlugin`. It acts as a **pure flat-file intake producer with zero Teradata database dependency**. Target table DDL (Just-In-Time Schema Guard), state tracking (`BATCH_RUNS` / `BATCH_TASKS`), in-flight crash recovery, and post-ingestion workflows are strictly relocated to `DATA_INGESTION_ORCHESTRATOR`. Custom or non-BICC sources can be plugged seamlessly using alternative plugins (`StandardManifestIntakePlugin`, `ManifestlessDropIntakePlugin`, or custom implementations).
 
 ---
 
