@@ -2,7 +2,7 @@
 
 ## 1. Testing Scope & Objectives
 
-The testing framework for the **BICC_INTAKE_CONTROLLER** validates the ingress gateway's robustness under both normal operations and upstream failure scenarios.
+The testing framework for the **BICC_INTAKE_CONTROLLER** validates the ingress gateway's robustness as a **pure, decoupled flat-file intake producer with zero Teradata database dependency**.
 
 ### Validation Boundaries
 ```mermaid
@@ -14,28 +14,29 @@ flowchart LR
         T4["Active Keys (.pecsv)"]
         T5["Unstable / In-Flight Upload"]
         T6["Zero-Byte / Truncated File"]
-        T7["Upstream Schema Drift"]
-        T8["In-Flight Crash Recovery"]
+        T7["Missing Manifested File"]
+        T8["--enqueue-only Producer Mode"]
         T9["Concurrent Feeder Race"]
     end
 
     subgraph Controller["BICC Intake Controller"]
         Lock["PID Concurrency Guard"]
-        Sentry["Sentry & Scanner"]
-        Guard["Schema Guard"]
-        Vault["Vault & Transfer"]
+        Sentry["Stability & Scanner"]
+        Header["In-Memory Header Reader"]
+        MD5["MD5 Manifest Factory"]
+        Capsule["Batch Capsule Packaging"]
         Bridge["Orchestrator Bridge"]
     end
 
     subgraph ExpectedOutcomes["Verified Assertions"]
         A1["FIFO Chronological Queue Execution"]
         A2["Settling Sentry Abort (RC 1)"]
-        A3["Auto-DDL Recreation (NOPI)"]
-        A4["Pristine Vault + Canonical Receipt"]
-        A5["Standardized Manifest in LANDING_ZONE"]
-        A6["FAIL_STOP Halt on Downstream Error"]
-        A7["Active Wait & Collision Avoidance"]
-        A8["In-Flight Batch Auto-Resumption"]
+        A3["0-byte / Missing File Abort (RC 1)"]
+        A4["Pristine Raw Manifest Vault + Receipt"]
+        A5["batch_descriptor.json Serialization"]
+        A6["Atomic Capsule Publishing in LANDING_ZONE"]
+        A7["Zero Teradata DB Connection / Query"]
+        A8["FAIL_STOP Halt on Downstream Error"]
     end
 
     Inputs --> Controller --> ExpectedOutcomes
@@ -45,15 +46,13 @@ flowchart LR
 
 ## 2. Test Environment & Sandbox Setup
 
-To run tests without impacting production or shared staging environments, use an isolated test directory tree:
+To run tests in an isolated sandbox without affecting runtime data directories:
 
 ```bash
 # Create isolated test sandbox
 export SANDBOX_DIR="/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST"
 mkdir -p "${SANDBOX_DIR}/DATA/DROP_ZONE/ORACLE_FUSION"
 mkdir -p "${SANDBOX_DIR}/DATA/LANDING_ZONE/ORACLE_FUSION"
-mkdir -p "${SANDBOX_DIR}/DATA/LOADING_ZONE/ORACLE_FUSION"
-mkdir -p "${SANDBOX_DIR}/DATA/ARCHIVE_ZONE/ORACLE_FUSION"
 mkdir -p "${SANDBOX_DIR}/LOGS/ORACLE_FUSION"
 mkdir -p "${SANDBOX_DIR}/CONFIG"
 
@@ -66,32 +65,21 @@ cp /sg/local/sid/home/Dsidadm/DATA_LOADER/CONFIG/entity_mapping.csv "${SANDBOX_D
 {
   "feeder": {
     "drop_zone": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE",
-    "raw_manifest_archive": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/ARCHIVE_ZONE",
     "logs_dir": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS",
     "file_stability_window_seconds": 2,
     "source_system_code": "ORACLE_FUSION",
+    "entity_mapping_file": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/CONFIG/entity_mapping.csv",
     "concurrency": {
       "poll_interval_seconds": 2,
       "lock_timeout_seconds": 30
     }
   },
-  "schema_guard": {
-    "auto_migrate_ddl": true,
-    "default_column_type": "VARCHAR(4000)",
-    "character_set": "UNICODE",
-    "target_database": "${TDENV}SIDFINSTG",
-    "entity_mapping_file": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/CONFIG/entity_mapping.csv"
-  },
   "orchestrator": {
     "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
     "landing_zone": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/LANDING_ZONE",
-    "python_executable": "python3"
-  },
-  "teradata": {
-    "host": "${TDPID}",
-    "user": "${TDENV}${SID_ADM_USER}",
-    "logmech": "TD2"
+    "python_executable": "python3",
+    "trigger_orchestrator": true
   }
 }
 ```
@@ -100,108 +88,58 @@ cp /sg/local/sid/home/Dsidadm/DATA_LOADER/CONFIG/entity_mapping.csv "${SANDBOX_D
 
 ## 3. Test Scenarios & Test Matrix
 
-The following test suite reflects empirical validation performed across test batches 1 through 15:
-
 | Test ID | Test Scenario | Input Dataset | Expected Result | Exit Code |
 |---|---|---|---|:---:|
-| **TC-FEED-01** | Nominal Single Batch CSV | `TEST_BATCH_1` | Batch ingested, vaulted, standardized manifest generated. | 0 |
-| **TC-FEED-02** | Nominal Single Batch ZIP | `TEST_BATCH_12` | In-memory ZIP header streaming, full ingestion. | 0 |
-| **TC-FEED-03** | Multi-Batch FIFO Queue | `TEST_BATCH_14_15_SIMULTANEOUS` | Oldest batch (14) completes before batch 15 starts. | 0 |
-| **TC-FEED-04** | File Stability Sentry (Incomplete Transfer) | Growing file in `DROP_ZONE` | Detects size alteration, aborts under `FAIL_STOP`. | 1 |
-| **TC-FEED-05** | Missing Data File | Manifest declares `fileA`, only `fileB` present | Detects missing file, aborts under `FAIL_STOP`. | 1 |
-| **TC-FEED-06** | Zero-Byte File Arrival | 0-byte file in `DROP_ZONE` | Stability sentry flags empty file, aborts. | 1 |
-| **TC-FEED-07** | Schema Drift (Added Column) | Sample CSV with new trailing column | Drops and recreates table with new column (NOPI). | 0 |
-| **TC-FEED-08** | In-Flight Recovery | Pre-existing `.MF` in `LOADING_ZONE` | Bypasses `DROP_ZONE`, completes in-flight batch. | 0 |
-| **TC-FEED-09** | Concurrency & Active Polling Wait | 2 concurrent feeder instances | Detects active PID, polls until lock released, avoids error 2652. | 0 |
-| **TC-FEED-10** | Hybrid Decoupling (`--skip-post-tasks`) | Batch with `--skip-post-tasks` | Ingests data, skips all post-tasks, logs bypass trace. | 0 |
-| **TC-FEED-11** | Multi-Source Partition Isolation | Simultaneous files in `DROP_ZONE/CRM` and `DROP_ZONE/ORACLE_FUSION` | Processes target partition only without touching other sources. | 0 |
-| **TC-FEED-12** | Source Post-Tasks Execution & Skip | Batch 9006 (nominal) & Batch 9008 (`--skip-post-tasks`) | Merges & executes source tasks; cleanly skips all tasks when flag passed. | 0 |
+| **TC-FEED-01** | Nominal Single Batch CSV | Single CSV batch in `DROP_ZONE` | Capsule staged in `LANDING_ZONE`, `batch_descriptor.json` created. | 0 |
+| **TC-FEED-02** | Nominal Single Batch ZIP | Single ZIP batch in `DROP_ZONE` | In-memory ZIP header extraction, capsule published. | 0 |
+| **TC-FEED-03** | Multi-Batch FIFO Queue | 2+ batches simultaneously in `DROP_ZONE` | Batches published in strict ascending chronological FIFO order. | 0 |
+| **TC-FEED-04** | Decoupled Mode (`--enqueue-only`) | Batches in `DROP_ZONE` with `--enqueue-only` | Batches published into `LANDING_ZONE` capsules; zero DB connection, Orchestrator not triggered. | 0 |
+| **TC-FEED-05** | File Stability Sentry (Incomplete Transfer) | Growing file in `DROP_ZONE` | Detects size alteration during settling window, aborts immediately. | 1 |
+| **TC-FEED-06** | Missing Data File | Manifest declares `fileA`, only `fileB` present | Detects missing file, aborts under `FAIL_STOP`. | 1 |
+| **TC-FEED-07** | Zero-Byte File Arrival | 0-byte file in `DROP_ZONE` | Stability sentry flags empty file, aborts under `FAIL_STOP`. | 1 |
+| **TC-FEED-08** | In-Memory Header Extraction Parity | CSV, ZIP, GZ, and PECSV files | Extracted column headers match file definitions and sanitize to uppercase. | 0 |
+| **TC-FEED-09** | Concurrency & Active Polling Wait | 2 concurrent feeder instances | Detects active PID, polls until lock released, avoids collisions. | 0 |
+| **TC-FEED-10** | Downstream Fail-Stop Propagation | Orchestrator fails on batch | Feeder halts immediately on non-zero exit code (`FAIL_STOP`). | 1 |
+| **TC-FEED-11** | Multi-Source Partition Isolation | Files in `DROP_ZONE/CRM` and `DROP_ZONE/ORACLE_FUSION` | Processes target partition only without touching other sources. | 0 |
 
 > [!TIP]
-> The automated Unix test suite in [`DATA_LOADER/TESTS/`](../../TESTS/README.md) validates all these scenarios end-to-end on Teradata Vantage with 100% automated pass verification (`./run_all_tests.sh`).
+> The automated test suite in [`DATA_LOADER/TESTS/`](../../TESTS/README.md) validates all these scenarios end-to-end with 100% automated pass verification (`./run_all_tests.sh`).
 
 ---
 
 ## 4. Detailed Test Procedures & Assertions
 
-### Test Case: TC-FEED-03 (Multi-Batch FIFO Simultaneous Arrival)
-- **Objective**: Verify that when multiple batches are deposited concurrently, the controller sorts them chronologically and processes them sequentially without violating single-batch boundaries.
-- **Setup**:
-  ```bash
-  cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_14_15_SIMULTANEOUS/* \
-     /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/ORACLE_FUSION/
-  ```
+### Test Case: TC-FEED-04 (Decoupled Mode `--enqueue-only`)
+- **Objective**: Verify that `--enqueue-only` stages complete Batch Capsules into `LANDING_ZONE/<SOURCE>/` without database connections or orchestrator invocation.
 - **Execution**:
   ```bash
-  python3 feeder.py --config /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json
-  ```
-- **Log Verification**:
-  ```bash
-  grep "Discovered 2 batch(es) in drop zone" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
-  grep "PROCESSING BATCH 1/2: ID=000000014" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
-  grep "PROCESSING BATCH 2/2: ID=000000015" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
-  ```
-- **Filesystem Verification**:
-  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000014_20261015_120014/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json`.
-  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000015_20261015_120015/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json`.
-  - `DROP_ZONE/ORACLE_FUSION` is empty at completion.
-
----
-
-### Test Case: TC-FEED-07 (Schema Drift & Auto-DDL)
-- **Objective**: Verify that Schema Guard detects added columns and executes `DROP TABLE` + `CREATE MULTISET TABLE ... NO PRIMARY INDEX`.
-- **Setup**:
-  1. Create a table with 3 columns in Teradata staging:
-     ```sql
-     CREATE MULTISET TABLE DEV0SIDFINSTG.ERP_MSH_USER (
-         USER_ID VARCHAR(4000) CHARACTER SET UNICODE NOT CASESPECIFIC,
-         USER_NAME VARCHAR(4000) CHARACTER SET UNICODE NOT CASESPECIFIC,
-         INFA_LAST_REPLICATED TIMESTAMP(0),
-         INFA_BATCH_ID VARCHAR(100) CHARACTER SET UNICODE NOT CASESPECIFIC
-     ) NO PRIMARY INDEX;
-     ```
-  2. Drop an extract file containing 4 payload columns: `USER_ID`, `USER_NAME`, `EMAIL_ADDRESS`, `STATUS`.
-- **Execution**:
-  ```bash
-  python3 feeder.py --config /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json
-  ```
-- **Log Verification**:
-  ```bash
-  grep "Schema drift detected!" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
-  grep "Successfully created NOPI staging table with 4 payload columns" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
-  ```
-- **Database Assertion**:
-  ```sql
-  SELECT ColumnName FROM DBC.ColumnsV 
-  WHERE DatabaseName = 'DEV0SIDFINSTG' AND TableName = 'ERP_MSH_USER' 
-  ORDER BY ColumnId;
-  ```
-  Columns returned: `USER_ID`, `USER_NAME`, `EMAIL_ADDRESS`, `STATUS`, `INFA_LAST_REPLICATED`, `INFA_BATCH_ID`.
-
----
-
-### Test Case: TC-FEED-08 (In-Flight Batch Crash Recovery)
-- **Objective**: Verify that when an uncompleted batch exists in `LOADING_ZONE/<SOURCE>` from a crashed execution, the feeder immediately resumes the Orchestrator before scanning new files from `DROP_ZONE`.
-- **Setup**:
-  1. Place an uncompleted standardized manifest and data files in `DATA/LOADING_ZONE/ORACLE_FUSION/`:
-     ```bash
-     cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_INFLIGHT/* \
-        /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/LOADING_ZONE/ORACLE_FUSION/
-     ```
-  2. Deposit a new batch in `DATA/DROP_ZONE/ORACLE_FUSION/`.
-- **Execution**:
-  ```bash
-  python3 feeder.py --config /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json
+  python3 feeder.py --config /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json --enqueue-only
   ```
 - **Assertions**:
-  - The controller logs: `In-flight batch detected in LOADING_ZONE (...). Resuming Orchestrator delegation (Crash Recovery)...`
-  - The in-flight batch is loaded into Teradata and moved to `ARCHIVE_ZONE/ORACLE_FUSION/`.
-  - Only after recovery completes does the controller process the new batch from `DROP_ZONE/ORACLE_FUSION/`.
+  - `DROP_ZONE/ORACLE_FUSION/` is empty at completion.
+  - `LANDING_ZONE/ORACLE_FUSION/` contains `BATCH_<CLEAN_TS>_<BATCH_ID>/` directories.
+  - Inside each capsule, `batch_descriptor.json` exists with pre-extracted `header_columns`, MD5 hashes, and file sizes.
+  - Inside each capsule, `RAW/` contains the vaulted original manifest and `RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json`.
+  - Process exits cleanly with Return Code `0`.
+
+---
+
+### Test Case: TC-FEED-05 (File Stability Sentry)
+- **Objective**: Verify that an active file upload in `DROP_ZONE` halts processing to prevent partial ingestion.
+- **Setup**: In a background process, append data to a file in `DROP_ZONE/ORACLE_FUSION/`.
+- **Execution**:
+  ```bash
+  python3 feeder.py --config test_config.json
+  ```
+- **Assertions**:
+  - Feeder logs: `Payload stability check failed for batch ...: File ... size changed during settling window. Upload in progress.`
+  - Feeder halts immediately under `FAIL_STOP` with Return Code `1`.
+  - No capsule is published to `LANDING_ZONE`.
 
 ---
 
 ### Test Case: TC-FEED-09 (Concurrency Guard & Active Polling Wait)
-- **Objective**: Verify that two feeder instances launched simultaneously on the same source do not corrupt state or trigger Teradata Error 2652.
+- **Objective**: Verify that two feeder instances launched simultaneously on the same source do not collide.
 - **Setup & Execution**:
   ```bash
   # Launch first instance in background
@@ -217,32 +155,3 @@ The following test suite reflects empirical validation performed across test bat
   - Instance 2 detects `.feeder_ORACLE_FUSION.pid` with PID of Instance 1.
   - Instance 2 logs: `Another BICC Intake Controller is currently active (PID ...). Entering active waiting loop...`
   - Instance 2 polls every 2 seconds until Instance 1 finishes, then resumes without errors.
-  - No Teradata table lock collisions occur.
-
----
-
-## 5. Automated Regression Test Script
-
-A lightweight bash script can execute the entire test sequence:
-
-```bash
-#!/bin/bash
-set -e
-
-CONFIG_FILE="/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/test_config.json"
-FEEDER_DIR="/sg/local/sid/home/Dsidadm/DATA_LOADER/PROCESSING_TOOLS/BICC_INTAKE_CONTROLLER"
-
-echo "=== Running BICC Intake Controller Regression Test Suite ==="
-
-# Test 1: Empty Drop Zone (RC 0 expected)
-python3 "${FEEDER_DIR}/feeder.py" --config "${CONFIG_FILE}"
-echo "[PASS] Empty drop zone handled gracefully."
-
-# Test 2: Multi-Batch Ingestion
-cp /sg/local/sid/home/Dsidadm/DATA_LOADER/DATA/TEST_BATCH_12/* \
-   /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE/ORACLE_FUSION/
-python3 "${FEEDER_DIR}/feeder.py" --config "${CONFIG_FILE}"
-echo "[PASS] Batch 12 processed and archived."
-
-echo "=== All Controller Tests Passed Successfully ==="
-```
