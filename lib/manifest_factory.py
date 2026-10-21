@@ -1,20 +1,28 @@
 """
 lib/manifest_factory.py - Manifest Factory, Vaulting & Ingress Transfer
 
-Computes cryptographic MD5 checksums, synthesizes orchestrator-compliant manifests,
-vaults original raw BICC manifests with JSON audit receipts, and transfers
-payload batches to the Orchestrator's LANDING_ZONE.
+Delegates cryptographic MD5 checksums, standardized manifest synthesis, and
+Batch Capsule path resolution to `dataloader_core`, while managing raw BICC
+manifest vaulting, JSON intake receipts, and LANDING_ZONE payload transfers.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import shutil
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
+_COMMON_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "COMMON"))
+if _COMMON_DIR not in sys.path:
+    sys.path.insert(0, _COMMON_DIR)
+
+from dataloader_core.capsule import CapsulePathResolver
+from dataloader_core.checksum import compute_file_checksum
+from dataloader_core.manifest import write_standardized_manifest
 
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 
@@ -22,13 +30,9 @@ logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 def compute_file_md5(file_path: str) -> str:
     """
     Computes cryptographic MD5 hash of a file reading in 64 KB blocks.
-    Memory-efficient for multi-gigabyte extracts.
+    Delegates to `dataloader_core.checksum.compute_file_checksum`.
     """
-    h = hashlib.md5()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(65536):
-            h.update(chunk)
-    return h.hexdigest().lower()
+    return compute_file_checksum(file_path, algorithm="md5")
 
 
 def create_standardized_manifest(
@@ -36,27 +40,20 @@ def create_standardized_manifest(
     source: str,
     extract_timestamp: str,
     batch_id: str,
-    file_checksum_pairs: List[Tuple[str, str]]
+    file_checksum_pairs: List[Tuple[str, str]],
 ) -> str:
     """
     Generates an orchestrator-compliant standardized manifest:
       MANIFEST_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.MF
-    Format:
-      filename,checksum
-      file1.csv,hash1
-    Returns the absolute path of the created manifest.
+    Delegates to `dataloader_core.manifest.write_standardized_manifest`.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    manifest_name = f"MANIFEST_{source}_{extract_timestamp}_{batch_id}.MF"
-    manifest_path = os.path.join(output_dir, manifest_name)
-
-    lines = ["filename,checksum\n"]
-    for fname, cs in file_checksum_pairs:
-        lines.append(f"{fname},{cs}\n")
-
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-
+    manifest_path = write_standardized_manifest(
+        output_dir=output_dir,
+        source=source,
+        extract_timestamp=extract_timestamp,
+        batch_id=batch_id,
+        file_checksum_pairs=file_checksum_pairs,
+    )
     logger.info(f"Created standardized manifest: '{manifest_path}' with {len(file_checksum_pairs)} file entries.")
     return manifest_path
 
@@ -67,32 +64,31 @@ def vault_raw_manifest(
     source: str,
     extract_timestamp: str,
     batch_id: str,
-    receipt_payload: List[Dict]
+    receipt_payload: List[Dict],
 ) -> str:
     """
     Vaults the pristine original BICC manifest into the Batch Capsule:
-      <archive_base_dir>/[<SOURCE>/][<YYYY-MM>/]BATCH_<BATCH_ID>_<EXTRACT_TIMESTAMP>/RAW/
+      <archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<BATCH_ID>_<EXTRACT_TIMESTAMP>/RAW/
     and writes the canonical intake receipt audit file:
       RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json
     Returns the path of the RAW vault directory.
     """
-    clean_ts = str(extract_timestamp).replace(":", "").replace("-", "").replace(" ", "_")
-    year_month = f"{clean_ts[:4]}-{clean_ts[4:6]}" if len(clean_ts) >= 6 else "UNKNOWN_DATE"
-    capsule_name = f"BATCH_{batch_id}_{clean_ts}"
+    clean_ts = CapsulePathResolver.normalize_timestamp_token(extract_timestamp)
+    clean_src = CapsulePathResolver.sanitize_token(source)
+    clean_batch = CapsulePathResolver.sanitize_token(batch_id)
 
-    # Build capsule directory path
-    if os.path.basename(archive_base_dir).lower() == str(source).lower():
-        vault_dir = os.path.join(archive_base_dir, year_month, capsule_name, "RAW")
-    else:
-        vault_dir = os.path.join(archive_base_dir, str(source), year_month, capsule_name, "RAW")
-    os.makedirs(vault_dir, exist_ok=True)
+    vault_dir = CapsulePathResolver.get_raw_vault_dir(
+        archive_base=archive_base_dir,
+        source=clean_src,
+        batch_id=clean_batch,
+        ts=clean_ts,
+        ensure_exists=True,
+    )
 
     raw_basename = os.path.basename(raw_manifest_path)
     vault_manifest_path = os.path.join(vault_dir, raw_basename)
     shutil.move(raw_manifest_path, vault_manifest_path)
 
-    clean_src = str(source).replace("/", "_").replace("\\", "_")
-    clean_batch = str(batch_id).replace("/", "_").replace("\\", "_")
     std_receipt_name = f"RECEIPT_{clean_src}_{clean_ts}_{clean_batch}.json"
     std_receipt_file = os.path.join(vault_dir, std_receipt_name)
 
@@ -103,7 +99,7 @@ def vault_raw_manifest(
         "intake_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "raw_manifest_vaulted": raw_basename,
         "receipt_file": std_receipt_name,
-        "payload": receipt_payload
+        "payload": receipt_payload,
     }
 
     with open(std_receipt_file, "w", encoding="utf-8") as f:
@@ -117,7 +113,7 @@ def transfer_batch_to_landing_zone(
     drop_zone_dir: str,
     landing_zone_dir: str,
     data_files: List[str],
-    standardized_manifest_path: Optional[str] = None
+    standardized_manifest_path: Optional[str] = None,
 ):
     """
     Moves data files (and standardized manifest if not already generated there)

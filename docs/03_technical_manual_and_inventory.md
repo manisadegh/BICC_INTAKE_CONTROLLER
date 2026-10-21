@@ -10,12 +10,13 @@ It supervises raw asynchronous ingress, orchestrates Auto-DDL schema migrations 
 
 ```
 BICC_INTAKE_CONTROLLER/
-├── feeder.py                  # Supervisor entrypoint & orchestrator bridge
+├── feeder.py                  # Thin CLI entrypoint (<80 lines) delegating to IntakeControllerService
 ├── config.json                # Deployment configuration file
 ├── config_template.json       # Clean template with defaults & concurrency
 ├── entity_mapping.csv         # Signatures to Teradata target table mapping
 ├── docs/                      # Comprehensive technical documentation suite
 └── lib/
+    ├── intake_service.py      # IntakeControllerService lifecycle orchestrator (imports dataloader_core)
     ├── scanner.py             # Manifest discovery, FIFO sorting, stability sentry
     ├── schema_guard.py        # In-memory header streaming & DBC.ColumnsV Auto-DDL
     ├── manifest_factory.py    # MD5 calculation, manifest synthesis & raw vaulting
@@ -26,46 +27,28 @@ BICC_INTAKE_CONTROLLER/
 
 ## 2. Module Inventory & Code Signatures
 
-### 2.1 Main Module: `feeder.py`
-- **Path**: `feeder.py`
-- **Role**: Command-line interface, process concurrency locking, in-flight crash recovery, and supervisor loop.
+### 2.1 CLI Entrypoint (`feeder.py`) & Service (`lib/intake_service.py`)
+- **Paths**: `feeder.py`, `lib/intake_service.py`
+- **Role**: Command-line interface (`feeder.py`) and cohesive service class (`IntakeControllerService`) backed by `COMMON/dataloader_core` (`ConfigLoader`, `ProcessLock`, `TeradataConnectionManager`, `EntityMapper`, `CapsulePathResolver`, `LoggingFactory`).
 
-#### Functions in `feeder.py`:
-1. `is_pid_alive(pid: int) -> bool`
-   - **Signature**: `is_pid_alive(pid: int) -> bool`
-   - **Description**: Verifies if a given OS Process ID is actively running on POSIX/Linux by executing `os.kill(pid, 0)` and catching `ProcessLookupError` and `PermissionError`.
-   - **Return**: `True` if active and accessible; `False` if dead or non-existent.
+#### Class `IntakeControllerService` (`lib/intake_service.py`):
+1. `__init__(config_path: str, source_override: Optional[str] = None, skip_post_tasks: bool = False)`
+   - **Description**: Loads configuration via `dataloader_core.config.ConfigLoader`, resolves source-partitioned zone paths (`DROP_ZONE`, `ARCHIVE_ZONE`, `LOADING_ZONE`, `LOGS`), and initializes the feeder logger via `LoggingFactory.setup_feeder_logger()`.
 
-2. `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
-   - **Signature**: `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
-   - **Description**: Configures a dual-handler logger (`stdout` stream and timestamped file `LOG_FEEDER_<SOURCE>_<YYYYMMDD_HHMMSS>.log` inside `logs_dir/<SOURCE>/`). Sets level to `INFO` with standardized timestamp format.
-   - **Side Effects**: Creates directory `logs_dir/<SOURCE>/` if absent; opens write file handle.
+2. `acquire_concurrency_guards() -> ProcessLock`
+   - **Description**: Returns a POSIX advisory lock (`dataloader_core.locking.ProcessLock`) on `DROP_ZONE/<SOURCE>/.feeder_<SOURCE>.pid` combining `fcntl.flock` with PID liveness polling (`poll_interval_seconds`, `lock_timeout_seconds`).
 
-3. `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
-   - **Signature**: `get_teradata_connection(td_cfg: dict) -> teradatasql.TeradataConnection`
-   - **Description**: Resolves host, user, and password parameters. First checks for `key_file`/`pass_file` explicitly; then checks `~/.dbt/<user>_Key.properties` and `Pass.properties`; then falls back to `TD_PASSWORD` or explicit password. Connects via `teradatasql.connect()`.
-   - **Exceptions**: `ValueError` if host or user cannot be resolved; `teradatasql.OperationalError` if logon fails.
+3. `recover_inflight_batch_if_present(conn_mgr: Optional[TeradataConnectionManager] = None) -> None`
+   - **Description**: Queries `${TDENV}SIDFINTCH.BATCH_RUNS` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid` via `wait_for_pid_completion()`. If an uncompleted `.MF` exists in `LOADING_ZONE/<SOURCE>` with a dead PID, writes source post-tasks inside the Batch Log Capsule and delegates crash recovery to `invoke_orchestrator()`.
 
-4. `select_header_chunk_file(file_list: List[str]) -> str`
-   - **Signature**: `select_header_chunk_file(file_list: List[str]) -> str`
-   - **Description**: Returns the file containing line 1 header in multi-chunk sets (uses deterministic alphabetical sorting `sorted(file_list)[0]`).
-   - **Return**: Filename string.
+4. `discover_and_sort_batches() -> List[Dict]`
+   - **Description**: Scans `DROP_ZONE/<SOURCE>/` via `scan_drop_zone()` and sorts batches in ascending FIFO chronological order via `sort_batches_fifo()`.
 
-5. `expand_env_vars(data: Any) -> Any`
-   - **Signature**: `expand_env_vars(data: Any) -> Any`
-   - **Description**: Recursively traverses nested dictionaries, lists, and strings, resolving `$VAR` or `${VAR}` using `os.path.expandvars()`.
+5. `process_single_batch(batch_info: Dict, conn_mgr: TeradataConnectionManager, mapper: EntityMapper) -> None`
+   - **Description**: Executes stability sentry check (`verify_payload_stability`), maps files via `EntityMapper`, synchronizes schemas via `sync_entity_schema_if_drifted` using pooled `TeradataConnectionManager`, computes MD5 checksums, vaults raw manifests, writes standardized manifest, transfers files to `LANDING_ZONE/<SOURCE>`, writes `POST_TASKS_<SOURCE>_<TS>_<ID>.json`, and invokes `DATA_INGESTION_ORCHESTRATOR` with `FAIL_STOP` semantics.
 
-6. `main() -> None`
-   - **Signature**: `main() -> None`
-   - **Execution Sequence**:
-     1. **Configuration**: Parses CLI flags (`--config`, `--skip-post-tasks`, `--source`), expands environment variables.
-     2. **Partitioning**: Enforces multi-source partition routing across `DROP_ZONE`, `LANDING_ZONE`, `LOADING_ZONE`, `ARCHIVE_ZONE`, and `LOGS`.
-     3. **Feeder Concurrency Guard**: Inspects `DROP_ZONE/<SOURCE>/.feeder_<SOURCE>.pid`. If an active PID is alive, enters a polling wait loop (`poll_interval_seconds: 5`) until release or timeout (`lock_timeout_seconds: 7200`). Acquires lock and registers `atexit` cleanup.
-     4. **Active Orchestrator Guard**: Queries `${TDENV}SIDFINTCH.BATCH_RUNS WHERE STATUS = 'RUNNING' AND SOURCE = ?` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. Enters active polling wait loop if an active batch or PID is detected.
-     5. **In-Flight Crash Recovery**: If uncompleted `.MF` exists in `LOADING_ZONE/<SOURCE>` with dead PID, resumes Orchestrator execution immediately with canonical capsule post-tasks before scanning new files.
-     6. **Drop Zone Scan & FIFO Sort**: Discovers all `*.MF` in `DROP_ZONE/<SOURCE>/` and sorts batches ascending chronologically by `(timestamp, batch_id)`.
-     7. **Batch Loop**: For each batch, verifies payload stability, groups files by entity, checks `DBC.ColumnsV`, auto-recreates tables upon schema drift (when `auto_migrate_ddl=True` and `load_mode='replace'`), computes MD5 checksums, vaults raw manifests into `ARCHIVE_ZONE/.../RAW/`, synthesizes standardized manifest, moves data files to `LANDING_ZONE/<SOURCE>`, prepares `POST_TASKS_<SOURCE>_...json`, and invokes Orchestrator.
-     8. **FAIL_STOP Barrier**: Evaluates return code. Aborts immediately (`sys.exit(rc)`) on non-zero exit.
+6. `run(skip_post_tasks: Optional[bool] = None) -> int`
+   - **Description**: Executes the complete supervisor workflow inside `with self.acquire_concurrency_guards():` and returns POSIX exit code (`0` or `1`).
 
 ---
 

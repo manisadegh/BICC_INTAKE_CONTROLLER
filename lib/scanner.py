@@ -1,158 +1,51 @@
 """
 lib/scanner.py - Drop Zone Scanner & Payload Stability Sentry
 
-Discovers raw manifests deposited in DROP_ZONE, parses batch metadata,
-resolves batch IDs from payload filenames when omitted from manifest names,
-sorts execution queues in strict ascending chronological order (FIFO),
-and validates file existence and upload stability.
+Discovers raw manifests deposited in DROP_ZONE, parses batch metadata via
+`dataloader_core.manifest`, resolves batch IDs from payload filenames when omitted
+from manifest names, sorts execution queues in strict ascending chronological
+order (FIFO), and validates file existence and upload stability.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import re
+import sys
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+_COMMON_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "COMMON"))
+if _COMMON_DIR not in sys.path:
+    sys.path.insert(0, _COMMON_DIR)
+
+from dataloader_core.manifest import (
+    MANIFEST_PATTERNS,
+    extract_batch_id_from_filenames,
+    parse_manifest_filename as _core_parse_manifest_filename,
+    read_manifest_entries,
+)
+
 logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
-
-# Precompiled patterns for standard and legacy manifest naming conventions
-MANIFEST_PATTERNS = [
-    # 1. Standard: MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF
-    re.compile(r"^MANIFEST[-_]([A-Za-z0-9_]+)[-_](\d{8}_\d{6})[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE),
-    # 2. Oracle BICC with Timestamp: *MANIFEST-YYYYMMDD_HHMMSS.MF (e.g. DT2_MANIFEST-20261013_131116.MF)
-    re.compile(r"^.*MANIFEST[-_](\d{8}_\d{6})\.MF$", re.IGNORECASE),
-    # 3. Legacy BICC raw: MANIFEST-batch<ID>-.MF
-    re.compile(r"^MANIFEST[-_]batch([A-Za-z0-9_-]+)[-_]\.MF$", re.IGNORECASE),
-    # 4. Single-token manifest: MANIFEST_<TOKEN>.MF
-    re.compile(r"^MANIFEST[-_]([A-Za-z0-9_-]+)\.MF$", re.IGNORECASE)
-]
-
-
-def extract_batch_id_from_filenames(declared_files: List[str]) -> Optional[str]:
-    """
-    Extracts batch_id from declared filenames following the pattern:
-      *<signature>-batch<batch_id>-YYYYMMDD_HHMMSS.zip/.csv
-      e.g. DT2_file_..._invoiceheaderextractpvo-batch847376139-20261013_131116.zip -> 847376139
-    """
-    for fname in declared_files:
-        m = re.search(r"-batch([A-Za-z0-9_-]+?)-", fname, re.IGNORECASE)
-        if m:
-            return m.group(1)
-    return None
 
 
 def parse_manifest_filename(filename: str, default_source: str = "ORACLE_FUSION") -> Dict:
     """
     Parses manifest filename to extract source, extract_timestamp, and batch_id.
     Constructs a deterministic sort_key for chronological FIFO ordering.
+    Delegates to `dataloader_core.manifest.parse_manifest_filename`.
     """
-    # 1. Standard: MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF
-    m1 = MANIFEST_PATTERNS[0].match(filename)
-    if m1:
-        source = m1.group(1).upper()
-        extract_ts_raw = m1.group(2)
-        batch_id = m1.group(3)
-        try:
-            dt = datetime.strptime(extract_ts_raw, "%Y%m%d_%H%M%S")
-            sort_key = (dt.timestamp(), batch_id)
-        except ValueError:
-            sort_key = (0.0, batch_id)
-        return {
-            "source": source,
-            "extract_timestamp": extract_ts_raw,
-            "batch_id": batch_id,
-            "sort_key": sort_key,
-            "batch_id_from_manifest": True
-        }
-
-    # 2. Oracle BICC with Timestamp: *MANIFEST-YYYYMMDD_HHMMSS.MF (e.g. DT2_MANIFEST-20261013_131116.MF)
-    m2 = MANIFEST_PATTERNS[1].match(filename)
-    if m2:
-        extract_ts_raw = m2.group(1)
-        try:
-            dt = datetime.strptime(extract_ts_raw, "%Y%m%d_%H%M%S")
-            ts_float = dt.timestamp()
-        except ValueError:
-            ts_float = 0.0
-        return {
-            "source": default_source,
-            "extract_timestamp": extract_ts_raw,
-            "batch_id": extract_ts_raw,  # Temporary placeholder; will be overridden by payload batch ID
-            "sort_key": (ts_float, extract_ts_raw),
-            "batch_id_from_manifest": False
-        }
-
-    # 3. Legacy BICC raw: MANIFEST-batch<ID>-.MF
-    m3 = MANIFEST_PATTERNS[2].match(filename)
-    if m3:
-        batch_id = m3.group(1)
-        sort_key_val = int(batch_id) if batch_id.isdigit() else batch_id
-        return {
-            "source": default_source,
-            "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "batch_id": batch_id,
-            "sort_key": (0.0, sort_key_val),
-            "batch_id_from_manifest": True
-        }
-
-    # 4. Single-token manifest: MANIFEST_<TOKEN>.MF
-    m4 = MANIFEST_PATTERNS[3].match(filename)
-    if m4:
-        token = m4.group(1)
-        sort_key_val = int(token) if token.isdigit() else token
-        return {
-            "source": default_source,
-            "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "batch_id": token,
-            "sort_key": (0.0, sort_key_val),
-            "batch_id_from_manifest": True
-        }
-
-    # 5. Fallback generic naming
-    base = os.path.splitext(filename)[0]
-    return {
-        "source": default_source,
-        "extract_timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "batch_id": base,
-        "sort_key": (0.0, base),
-        "batch_id_from_manifest": False
-    }
+    return _core_parse_manifest_filename(filename, default_source=default_source).to_dict()
 
 
 def read_declared_files_from_manifest(manifest_path: str) -> List[str]:
     """
     Reads data file names declared inside the manifest file.
-    Supports CSV headers (filename,checksum) or raw lists of filenames.
-    Ignores blank lines, comments, and key-value lines.
+    Delegates to `dataloader_core.manifest.read_manifest_entries`.
     """
-    declared = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line_str = line.strip()
-            if not line_str or line_str.startswith("#") or "=" in line_str:
-                continue
-
-            # Parse delimiter: semicolon, tab, or comma
-            if ";" in line_str:
-                parts = line_str.split(";")
-            elif "\t" in line_str:
-                parts = line_str.split("\t")
-            elif "," in line_str:
-                parts = line_str.split(",")
-            else:
-                parts = [line_str]
-
-            token = parts[0].strip().strip('"').strip("'")
-            if token.lower() in ("filename", "file_name", "file"):
-                continue  # Header line
-
-            if token:
-                declared.append(token)
-
-    return declared
+    entries = read_manifest_entries(manifest_path, require_non_empty=False)
+    return [entry.filename for entry in entries]
 
 
 def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") -> List[Dict]:
@@ -196,7 +89,7 @@ def scan_drop_zone(drop_zone_dir: str, default_source: str = "ORACLE_FUSION") ->
                 "extract_timestamp": meta["extract_timestamp"],
                 "batch_id": meta["batch_id"],
                 "sort_key": meta["sort_key"],
-                "declared_files": declared_files
+                "declared_files": declared_files,
             })
 
     return manifests
@@ -209,7 +102,11 @@ def sort_batches_fifo(batches: List[Dict]) -> List[Dict]:
     return sorted(batches, key=lambda b: b["sort_key"])
 
 
-def verify_payload_stability(drop_zone_dir: str, declared_files: List[str], settling_window_sec: int = 5) -> Tuple[bool, str]:
+def verify_payload_stability(
+    drop_zone_dir: str,
+    declared_files: List[str],
+    settling_window_sec: int = 5,
+) -> Tuple[bool, str]:
     """
     Verifies that all files declared in the manifest exist in DROP_ZONE,
     are non-empty (>0 bytes), and remain stable (unmodified) during the settling window.
@@ -238,6 +135,10 @@ def verify_payload_stability(drop_zone_dir: str, declared_files: List[str], sett
             fpath = os.path.join(drop_zone_dir, fname)
             current_size = os.path.getsize(fpath)
             if current_size != initial_sizes[fname]:
-                return False, f"File '{fname}' size changed during settling window ({initial_sizes[fname]} -> {current_size} bytes). Upload in progress."
+                return (
+                    False,
+                    f"File '{fname}' size changed during settling window "
+                    f"({initial_sizes[fname]} -> {current_size} bytes). Upload in progress.",
+                )
 
     return True, "All declared files exist and are stable."
