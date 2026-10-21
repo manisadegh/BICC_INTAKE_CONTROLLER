@@ -1,9 +1,8 @@
 """
-lib/manifest_factory.py - Manifest Factory, Vaulting & Ingress Transfer
+lib/manifest_factory.py - Manifest Factory, Capsule Staging & Ingress Publishing
 
 Delegates cryptographic MD5 checksums, standardized manifest synthesis, and
-Batch Capsule path resolution to `dataloader_core`, while managing raw BICC
-manifest vaulting, JSON intake receipts, and LANDING_ZONE payload transfers.
+atomic `.staging_BATCH_*` -> `BATCH_*` queue capsule publishing to `dataloader_core`.
 """
 
 from __future__ import annotations
@@ -14,13 +13,13 @@ import os
 import shutil
 import sys
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _COMMON_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "COMMON"))
 if _COMMON_DIR not in sys.path:
     sys.path.insert(0, _COMMON_DIR)
 
-from dataloader_core.capsule import CapsulePathResolver
+from dataloader_core.capsule import BatchDescriptor, CapsulePathResolver
 from dataloader_core.checksum import compute_file_checksum
 from dataloader_core.manifest import write_standardized_manifest
 
@@ -58,6 +57,44 @@ def create_standardized_manifest(
     return manifest_path
 
 
+def stage_batch_capsule_to_landing_zone(
+    landing_zone_dir: str,
+    drop_zone_dir: str,
+    raw_manifest_path: str,
+    source: str,
+    extract_timestamp: str,
+    batch_id: str,
+    entities_descriptor: Dict[str, Dict[str, Any]],
+    file_checksum_pairs: List[Tuple[str, str]],
+    receipt_payload: List[Dict[str, Any]],
+    declared_files: List[str],
+) -> Tuple[str, BatchDescriptor]:
+    """
+    Stages a self-contained Batch Capsule in `<landing_zone_dir>/.staging_BATCH_<TS>_<ID>/`
+    (containing `RAW/` with vaulted raw manifest + `RECEIPT_*.json`, `MANIFEST_*.MF`,
+    `batch_descriptor.json`, and payload files) and atomically renames it to
+    `<landing_zone_dir>/BATCH_<TS>_<ID>/`.
+    """
+    final_dir, descriptor = CapsulePathResolver.stage_and_publish_queue_capsule(
+        landing_zone_dir=landing_zone_dir,
+        drop_zone_dir=drop_zone_dir,
+        raw_manifest_path=raw_manifest_path,
+        source=source,
+        extract_timestamp=extract_timestamp,
+        batch_id=batch_id,
+        entities_descriptor=entities_descriptor,
+        file_checksum_pairs=file_checksum_pairs,
+        receipt_payload=receipt_payload,
+        declared_files=declared_files,
+    )
+    logger.info(
+        f"Published queued Batch Capsule '{final_dir}' "
+        f"(manifest='{descriptor.standardized_manifest}', receipt='{descriptor.receipt_file}', "
+        f"files={len(declared_files)})."
+    )
+    return final_dir, descriptor
+
+
 def vault_raw_manifest(
     raw_manifest_path: str,
     archive_base_dir: str,
@@ -67,11 +104,7 @@ def vault_raw_manifest(
     receipt_payload: List[Dict],
 ) -> str:
     """
-    Vaults the pristine original BICC manifest into the Batch Capsule:
-      <archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<BATCH_ID>_<EXTRACT_TIMESTAMP>/RAW/
-    and writes the canonical intake receipt audit file:
-      RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json
-    Returns the path of the RAW vault directory.
+    Legacy helper: vaults the raw BICC manifest into `<archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`.
     """
     clean_ts = CapsulePathResolver.normalize_timestamp_token(extract_timestamp)
     clean_src = CapsulePathResolver.sanitize_token(source)
@@ -116,8 +149,7 @@ def transfer_batch_to_landing_zone(
     standardized_manifest_path: Optional[str] = None,
 ):
     """
-    Moves data files (and standardized manifest if not already generated there)
-    from DROP_ZONE to the Orchestrator's LANDING_ZONE.
+    Moves data files from DROP_ZONE to LANDING_ZONE.
     """
     os.makedirs(landing_zone_dir, exist_ok=True)
 

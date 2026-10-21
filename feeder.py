@@ -1,9 +1,9 @@
 """
-feeder.py - BICC Intake Controller & Auto-DDL Supervisor CLI Entrypoint
+feeder.py - BICC Intake Controller CLI Entrypoint (Pure Producer)
 
-Thin CLI entrypoint delegating intake scanning, FIFO scheduling, Schema Guard
-introspection, raw manifest vaulting, and Orchestrator invocation to
-`lib.intake_service.IntakeControllerService` and `dataloader_core`.
+Thin CLI entrypoint delegating DROP_ZONE scanning, FIFO scheduling, in-memory
+header inspection, MD5 calculation, atomic Batch Capsule staging in LANDING_ZONE,
+and optional Orchestrator trigger to `lib.intake_service.IntakeControllerService`.
 """
 
 from __future__ import annotations
@@ -20,14 +20,14 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from dataloader_core.config import expand_env_vars
-from dataloader_core.db import get_teradata_connection
 from dataloader_core.exceptions import DataLoaderError
 from dataloader_core.logging_utils import setup_feeder_logger as setup_logger
-from lib.intake_service import IntakeControllerService, select_header_chunk_file
+from dataloader_core.schema_reader import select_header_chunk_file
+from lib.intake_service import IntakeControllerService
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BICC Intake Controller - Over-Arching Oracle Fusion Feeder")
+    parser = argparse.ArgumentParser(description="BICC Intake Controller - Stateless Batch Capsule Producer")
     parser.add_argument("--config", type=str, required=True, help="Path to controller configuration JSON file")
     parser.add_argument(
         "--skip-post-tasks",
@@ -36,6 +36,12 @@ def main() -> None:
         help="Skip execution of downstream post-ingestion tasks (e.g. dbt)",
     )
     parser.add_argument("--source", type=str, default=None, help="Explicit data source system code override")
+    parser.add_argument(
+        "--enqueue-only",
+        action="store_true",
+        default=False,
+        help="Stage and publish Batch Capsules in LANDING_ZONE without invoking the Orchestrator",
+    )
     args = parser.parse_args()
 
     try:
@@ -43,6 +49,7 @@ def main() -> None:
             config_path=args.config,
             source_override=args.source,
             skip_post_tasks=args.skip_post_tasks,
+            enqueue_only=args.enqueue_only,
         )
         sys.exit(service.run())
     except DataLoaderError as exc:

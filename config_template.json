@@ -1,37 +1,20 @@
 {
   "feeder": {
     "drop_zone": "../../DATA/DROP_ZONE",
-    "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE",
     "logs_dir": "../../LOGS",
     "file_stability_window_seconds": 3,
     "source_system_code": "ORACLE_FUSION",
+    "entity_mapping_file": "../../CONFIG/entity_mapping.csv",
     "concurrency": {
       "poll_interval_seconds": 5,
       "lock_timeout_seconds": 7200
-    },
-    "post_ingestion_tasks": [
-      {
-        "type": "shell",
-        "command": "echo 'Post-task specific to BICC completed for batch $CURRENT_BATCH_ID'"
-      }
-    ]
-  },
-  "schema_guard": {
-    "auto_migrate_ddl": true,
-    "default_column_type": "VARCHAR(4000)",
-    "character_set": "UNICODE",
-    "target_database": "${TDENV}SIDFINSTG",
-    "entity_mapping_file": "../../CONFIG/entity_mapping.csv"
+    }
   },
   "orchestrator": {
     "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
     "landing_zone": "../../DATA/LANDING_ZONE",
-    "python_executable": "python3"
-  },
-  "teradata": {
-    "host": "${TDPID}",
-    "user": "${TDENV}${SID_ADM_USER}",
-    "logmech": "TD2"
+    "python_executable": "python3",
+    "trigger_orchestrator": true
   }
 }
