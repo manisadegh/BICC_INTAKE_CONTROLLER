@@ -92,5 +92,26 @@ class IntakeControllerService(BaseIntakeController):
             self.mapper = mapper
         return self.stage_and_publish_batch(batch_info)
 
+    def invoke_orchestration_stage(self) -> int:
+        """Launches DATA_INGESTION_ORCHESTRATOR using invoke_orchestrator helper."""
+        extra_env = os.environ.copy()
+        if "auto_migrate_ddl" in self.schema_cfg:
+            extra_env["DL_AUTO_MIGRATE_DDL"] = "true" if self.schema_cfg.get("auto_migrate_ddl") else "false"
+
+        post_tasks_file = self._write_post_tasks_file()
+
+        rc = invoke_orchestrator(
+            orchestrator_dir=self.orch_dir,
+            config_file=self.orch_config,
+            python_bin=self.python_bin,
+            env=extra_env,
+            skip_post_tasks=self.skip_post_tasks,
+            source=self.default_source,
+            post_tasks_file=post_tasks_file,
+        )
+        if rc != 0:
+            raise OrchestratorExecutionError(f"Orchestrator failed with non-zero exit code {rc} under FAIL_STOP.")
+        return 0
+
     process_batch = process_single_batch
     enqueue_batch_capsule = process_single_batch
