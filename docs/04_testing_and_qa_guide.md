@@ -68,8 +68,6 @@ cp /sg/local/sid/home/Dsidadm/DATA_LOADER/CONFIG/entity_mapping.csv "${SANDBOX_D
     "drop_zone": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/DROP_ZONE",
     "raw_manifest_archive": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/DATA/ARCHIVE_ZONE",
     "logs_dir": "/sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS",
-    "batch_selection_policy": "FIFO_ALL",
-    "on_batch_failure": "abort",
     "file_stability_window_seconds": 2,
     "source_system_code": "ORACLE_FUSION",
     "concurrency": {
@@ -144,8 +142,8 @@ The following test suite reflects empirical validation performed across test bat
   grep "PROCESSING BATCH 2/2: ID=000000015" /sg/local/sid/home/Dsidadm/DATA_LOADER/SANDBOX_TEST/LOGS/ORACLE_FUSION/LOG_FEEDER_*.log
   ```
 - **Filesystem Verification**:
-  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000014_20261015_120014/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json` (and `intake_receipt.json`).
-  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000015_20261015_120015/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json` (and `intake_receipt.json`).
+  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000014_20261015_120014/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json`.
+  - `ARCHIVE_ZONE/ORACLE_FUSION/2026-10/BATCH_000000015_20261015_120015/RAW/` contains raw manifest and `RECEIPT_ORACLE_FUSION_...json`.
   - `DROP_ZONE/ORACLE_FUSION` is empty at completion.
 
 ---

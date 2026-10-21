@@ -72,8 +72,8 @@ def vault_raw_manifest(
     """
     Vaults the pristine original BICC manifest into the Batch Capsule:
       <archive_base_dir>/[<SOURCE>/][<YYYY-MM>/]BATCH_<BATCH_ID>_<EXTRACT_TIMESTAMP>/RAW/
-    and writes standardized and legacy intake receipt audit files:
-      RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json & intake_receipt.json
+    and writes the canonical intake receipt audit file:
+      RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json
     Returns the path of the RAW vault directory.
     """
     clean_ts = str(extract_timestamp).replace(":", "").replace("-", "").replace(" ", "_")
@@ -95,7 +95,6 @@ def vault_raw_manifest(
     clean_batch = str(batch_id).replace("/", "_").replace("\\", "_")
     std_receipt_name = f"RECEIPT_{clean_src}_{clean_ts}_{clean_batch}.json"
     std_receipt_file = os.path.join(vault_dir, std_receipt_name)
-    legacy_receipt_file = os.path.join(vault_dir, "intake_receipt.json")
 
     receipt_data = {
         "batch_id": batch_id,
@@ -108,8 +107,6 @@ def vault_raw_manifest(
     }
 
     with open(std_receipt_file, "w", encoding="utf-8") as f:
-        json.dump(receipt_data, f, indent=2)
-    with open(legacy_receipt_file, "w", encoding="utf-8") as f:
         json.dump(receipt_data, f, indent=2)
 
     logger.info(f"Vaulted original manifest '{raw_basename}' and receipt '{std_receipt_name}' to '{vault_dir}'.")

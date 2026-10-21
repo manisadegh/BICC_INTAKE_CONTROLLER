@@ -45,8 +45,8 @@ flowchart TD
 3. **Automated In-Flight Crash Recovery**: If a prior orchestrator execution crashed abruptly (leaving an uncompleted `.MF` in `LOADING_ZONE/<SOURCE>` with a dead PID), the feeder detects it upon startup and immediately resumes orchestration before ingesting new batches.
 4. **FIFO Ingress Queueing**: Automatically detects multi-batch arrivals in `DROP_ZONE/<SOURCE>/` and executes them strictly in ascending chronological order (oldest extract first) to preserve temporal data integrity. Files deposited at the root of `DROP_ZONE/` are strictly ignored to prevent cross-source contamination.
 5. **File Stability Sentry**: Verifies that files are non-empty (>0 bytes) and that file sizes do not fluctuate during a configurable settling window (guarantees external SFTP/cloud copy completion).
-6. **Automated Schema Guard**: Detects schema drift in source extracts without extracting compressed files to disk (streams headers directly from `.zip` / `.gz` archives) and auto-recreates target Teradata staging tables in `NOPI` `VARCHAR(4000)` format when needed.
-7. **Standardized Cryptographic Manifest**: Calculates MD5 sums on data payloads, vaults the pristine upstream raw manifest with a canonical JSON intake receipt (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`), and moves the batch atomically into `LANDING_ZONE/<SOURCE>/`.
+6. **Automated Schema Guard**: Detects schema drift in source extracts without extracting compressed files to disk (streams headers directly from `.zip` / `.gz` archives) and auto-recreates target Teradata staging tables in `NOPI` `VARCHAR(4000)` format when `auto_migrate_ddl` is enabled and `load_mode` is `replace` (while blocking destructive `DROP TABLE` in `append` mode or when `auto_migrate_ddl` is `false`).
+7. **Standardized Cryptographic Manifest**: Calculates MD5 sums on data payloads, vaults the pristine upstream raw manifest with a canonical JSON intake receipt (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json`), and moves the batch atomically into `LANDING_ZONE/<SOURCE>/`.
 8. **Source-Specific Post-Tasks**: Generates source-scoped post-load action definitions (`POST_TASKS_<SOURCE>_<TS>_<BATCH_ID>.json`) and forwards them to the Orchestrator via `--post-tasks-file`.
 9. **FAIL_STOP Delegation**: Synchronously invokes `DATA_INGESTION_ORCHESTRATOR` and aborts immediately if any downstream step fails.
 
@@ -150,8 +150,6 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
     "drop_zone": "../../DATA/DROP_ZONE",
     "raw_manifest_archive": "../../DATA/ARCHIVE_ZONE",
     "logs_dir": "../../LOGS",
-    "batch_selection_policy": "FIFO_ALL",
-    "on_batch_failure": "abort",
     "file_stability_window_seconds": 3,
     "source_system_code": "ORACLE_FUSION",
     "concurrency": {
@@ -194,20 +192,18 @@ Configuration files support environment variable expansion (e.g. `${TDENV}`, `${
 | `drop_zone` | String | `../../DATA/DROP_ZONE` | Path to upstream arrival base directory. Feeder automatically partitions to `DROP_ZONE/<SOURCE>/` (e.g. `DROP_ZONE/ORACLE_FUSION/`). Files dropped at the root of `DROP_ZONE/` are strictly ignored. |
 | `raw_manifest_archive` | String | `../../DATA/ARCHIVE_ZONE` | Base archive directory. Raw manifests and intake receipts are vaulted inside the Batch Capsule: `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`. |
 | `logs_dir` | String | `../../LOGS` | Central directory where execution logs are written, automatically partitioned by source (`LOGS/<SOURCE>/`). |
-| `batch_selection_policy` | String | `FIFO_ALL` | Policy for processing multi-batch queues. Currently `FIFO_ALL` processes all detected batches from oldest to newest. |
-| `on_batch_failure` | String | `abort` | Policy on downstream error: `abort` applies `FAIL_STOP`, exiting immediately. |
 | `file_stability_window_seconds` | Integer | `3` | Number of seconds to wait during stability sentry checking before confirming file size constancy. |
 | `source_system_code` | String | `ORACLE_FUSION` | Identifier for the source ERP system. |
 | `concurrency.poll_interval_seconds` | Integer | `5` | Polling interval in seconds when waiting for another active Feeder, active Orchestrator, or active Teradata batch to finish. |
 | `concurrency.lock_timeout_seconds` | Integer | `7200` | Maximum wait timeout (in seconds) before aborting if another process remains active. |
-| `post_ingestion_tasks` | List[Dict] | `[]` | Optional list of source-specific post-ingestion tasks (e.g. shell scripts, dbt runs) dumped to a batch JSON file and passed to Orchestrator via `--post-tasks-file`. |
+| `post_ingestion_tasks` | List[Dict] | `[]` | Optional list of source-specific post-ingestion tasks (e.g. shell scripts, dbt runs) dumped to the batch capsule (`POST_TASKS_<SOURCE>_<TS>_<BATCH_ID>.json`) and passed to Orchestrator via `--post-tasks-file`. |
 
 #### `schema_guard` Block
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `auto_migrate_ddl` | Boolean | `true` | If `true`, recreates target table in `NOPI` format upon schema drift or missing table. |
+| `auto_migrate_ddl` | Boolean | `true` | If `true`, recreates target table in `NOPI` format upon schema drift or missing table (in `replace` mode). If `false`, raises a fatal `RuntimeError` on missing table or schema drift without executing DDL. Also blocks `DROP TABLE` if `load_mode == 'append'`. |
 | `default_column_type` | String | `VARCHAR(4000)` | Teradata datatype applied to all payload columns in auto-generated DDL. |
-| `character_set` | String | `UNICODE` | Teradata character set applied (`UNICODE NOT CASESPECIFIC`). |
+| `character_set` | String | `UNICODE` | Teradata character set applied (`UNICODE` or `LATIN`). |
 | `target_database` | String | `${TDENV}SIDFINSTG` | Teradata staging database hosting physical staging tables. |
 | `entity_mapping_file` | String | `../../CONFIG/entity_mapping.csv` | Path to entity routing mapping CSV. |
 

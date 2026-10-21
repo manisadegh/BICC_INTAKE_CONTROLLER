@@ -33,7 +33,7 @@ BICC_INTAKE_CONTROLLER/
 #### Functions in `feeder.py`:
 1. `is_pid_alive(pid: int) -> bool`
    - **Signature**: `is_pid_alive(pid: int) -> bool`
-   - **Description**: Verifies if a given OS Process ID is actively running. On POSIX/Linux, executes `os.kill(pid, 0)` and catches `ProcessLookupError` and `PermissionError`. On Windows NT, calls `kernel32.OpenProcess` with `SYNCHRONIZE` rights.
+   - **Description**: Verifies if a given OS Process ID is actively running on POSIX/Linux by executing `os.kill(pid, 0)` and catching `ProcessLookupError` and `PermissionError`.
    - **Return**: `True` if active and accessible; `False` if dead or non-existent.
 
 2. `setup_logger(logs_dir: str, source: Optional[str] = None) -> logging.Logger`
@@ -61,10 +61,10 @@ BICC_INTAKE_CONTROLLER/
      1. **Configuration**: Parses CLI flags (`--config`, `--skip-post-tasks`, `--source`), expands environment variables.
      2. **Partitioning**: Enforces multi-source partition routing across `DROP_ZONE`, `LANDING_ZONE`, `LOADING_ZONE`, `ARCHIVE_ZONE`, and `LOGS`.
      3. **Feeder Concurrency Guard**: Inspects `DROP_ZONE/<SOURCE>/.feeder_<SOURCE>.pid`. If an active PID is alive, enters a polling wait loop (`poll_interval_seconds: 5`) until release or timeout (`lock_timeout_seconds: 7200`). Acquires lock and registers `atexit` cleanup.
-     4. **Active Orchestrator Guard**: Queries `${TDENV}SIDFINTCH.BATCH_RUNS WHERE STATUS = 'RUNNING'` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. Enters active polling wait loop if an active batch or PID is detected.
-     5. **In-Flight Crash Recovery**: If uncompleted `.MF` exists in `LOADING_ZONE/<SOURCE>` with dead PID, resumes Orchestrator execution immediately with in-flight post-tasks before scanning new files.
+     4. **Active Orchestrator Guard**: Queries `${TDENV}SIDFINTCH.BATCH_RUNS WHERE STATUS = 'RUNNING' AND SOURCE = ?` and checks `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. Enters active polling wait loop if an active batch or PID is detected.
+     5. **In-Flight Crash Recovery**: If uncompleted `.MF` exists in `LOADING_ZONE/<SOURCE>` with dead PID, resumes Orchestrator execution immediately with canonical capsule post-tasks before scanning new files.
      6. **Drop Zone Scan & FIFO Sort**: Discovers all `*.MF` in `DROP_ZONE/<SOURCE>/` and sorts batches ascending chronologically by `(timestamp, batch_id)`.
-     7. **Batch Loop**: For each batch, verifies payload stability, groups files by entity, checks `DBC.ColumnsV`, auto-recreates tables upon schema drift, computes MD5 checksums, vaults raw manifests into `ARCHIVE_ZONE/.../RAW/`, synthesizes standardized manifest, moves data files to `LANDING_ZONE/<SOURCE>`, prepares `POST_TASKS_<SOURCE>_...json`, and invokes Orchestrator.
+     7. **Batch Loop**: For each batch, verifies payload stability, groups files by entity, checks `DBC.ColumnsV`, auto-recreates tables upon schema drift (when `auto_migrate_ddl=True` and `load_mode='replace'`), computes MD5 checksums, vaults raw manifests into `ARCHIVE_ZONE/.../RAW/`, synthesizes standardized manifest, moves data files to `LANDING_ZONE/<SOURCE>`, prepares `POST_TASKS_<SOURCE>_...json`, and invokes Orchestrator.
      8. **FAIL_STOP Barrier**: Evaluates return code. Aborts immediately (`sys.exit(rc)`) on non-zero exit.
 
 ---
@@ -118,14 +118,14 @@ BICC_INTAKE_CONTROLLER/
 6. `get_teradata_table_columns(connection, target_db: str, target_table: str) -> Optional[List[str]]`
    - **Description**: Queries Teradata system view `DBC.ColumnsV` ordered by `ColumnId`. Excludes `TECHNICAL_AUDIT_COLUMNS` (`INFA_BATCH_ID`, `INFA_LAST_REPLICATED`). Returns `None` if table does not exist.
 
-7. `generate_staging_ddl(target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)") -> str`
-   - **Description**: Constructs DDL string for `CREATE MULTISET TABLE ... NO PRIMARY INDEX` with all payload columns typed as `VARCHAR(4000) CHARACTER SET UNICODE NOT CASESPECIFIC` and audit columns appended.
+7. `generate_staging_ddl(target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)", character_set: str = "UNICODE") -> str`
+   - **Description**: Validates SQL identifiers and column types, then constructs DDL string for `CREATE MULTISET TABLE ... NO PRIMARY INDEX` with all payload columns typed as `<default_type> CHARACTER SET <character_set> NOT CASESPECIFIC` and audit columns appended.
 
-8. `recreate_staging_table(connection, target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)")`
+8. `recreate_staging_table(connection, target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)", character_set: str = "UNICODE")`
    - **Description**: Executes `DROP TABLE` followed by table creation using generated DDL.
 
-9. `sync_entity_schema_if_drifted(...) -> Tuple[bool, str, List[str]]`
-   - **Description**: Compares source CSV columns against Teradata table columns. If table missing $\rightarrow$ creates table (`CREATED`). If columns differ $\rightarrow$ drops and recreates table (`RECREATED`). If columns identical $\rightarrow$ no-op (`IDENTICAL`).
+9. `sync_entity_schema_if_drifted(connection, target_db: str, target_table: str, source_csv_path: str, default_type: str = "VARCHAR(4000)", character_set: str = "UNICODE", auto_migrate_ddl: bool = True, load_mode: str = "replace") -> Tuple[bool, str, List[str]]`
+   - **Description**: Compares source CSV columns against Teradata table columns. Raises `RuntimeError` if `auto_migrate_ddl=False` on missing table or schema drift, or if `load_mode == 'append'` on schema drift (preventing destructive `DROP TABLE`). Otherwise, if table missing $\rightarrow$ creates table (`CREATED`); if columns differ $\rightarrow$ drops and recreates table (`RECREATED`); if columns identical $\rightarrow$ no-op (`IDENTICAL`).
 
 ---
 
@@ -141,7 +141,7 @@ BICC_INTAKE_CONTROLLER/
    - **Description**: Generates `MANIFEST_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.MF` containing CSV header `filename,checksum`.
 
 3. `vault_raw_manifest(raw_manifest_path: str, archive_base_dir: str, source: str, extract_timestamp: str, batch_id: str, receipt_payload: List[Dict]) -> str`
-   - **Description**: Vaults original BICC manifest into Batch Capsule `<archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/` and writes canonical `RECEIPT_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`.
+   - **Description**: Vaults original BICC manifest into Batch Capsule `<archive_base_dir>/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/` and writes canonical `RECEIPT_<SOURCE>_<EXTRACT_TS>_<BATCH_ID>.json`.
 
 4. `transfer_batch_to_landing_zone(drop_zone_dir: str, landing_zone_dir: str, data_files: List[str], standardized_manifest_path: Optional[str] = None)`
    - **Description**: Moves all manifested data payload files from `DROP_ZONE/<SOURCE>` into `LANDING_ZONE/<SOURCE>`.
@@ -171,11 +171,11 @@ ORDER BY ColumnId;
 ```
 
 ### 3.2 Pre-Flight Active Batch Check against `BATCH_RUNS`
-To prevent concurrent worker collisions before touching ingress files:
+To prevent concurrent worker collisions for the same source before touching ingress files:
 ```sql
 SELECT BATCH_ID, SOURCE, START_TIME, PROCESS_PID 
 FROM {technical_database}.BATCH_RUNS 
-WHERE STATUS = 'RUNNING';
+WHERE STATUS = 'RUNNING' AND SOURCE = ?;
 ```
 
 ### 3.3 Automated NOPI Staging Table DDL Template

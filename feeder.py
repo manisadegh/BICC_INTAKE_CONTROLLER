@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -22,36 +23,23 @@ import time
 import teradatasql
 
 def is_pid_alive(pid: int) -> bool:
-    """Checks if a given process ID is actively running."""
+    """Checks if a given process ID is actively running (POSIX)."""
     if pid <= 0:
         return False
-    if os.name == 'nt':
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            SYNCHRONIZE = 0x00100000
-            process = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-            if process != 0:
-                kernel32.CloseHandle(process)
-                return True
-            return False
-        except Exception:
-            return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
-        except PermissionError:
-            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
 
 # Ensure local lib/ modules are importable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from lib.scanner import scan_drop_zone, sort_batches_fifo, verify_payload_stability
+from lib.scanner import parse_manifest_filename, scan_drop_zone, sort_batches_fifo, verify_payload_stability
 from lib.schema_guard import (
     load_entity_mappings,
     match_target_table_for_file,
@@ -202,10 +190,6 @@ def main():
     elif not raw_archive and drop_zone:
         raw_archive = os.path.join(drop_zone, "archive")
 
-    # Multi-source support for raw manifest vaulting
-    if default_source and raw_archive and "ORACLE_FUSION_MANIFESTS" in raw_archive and default_source != "ORACLE_FUSION":
-        raw_archive = raw_archive.replace("ORACLE_FUSION_MANIFESTS", f"{default_source}_MANIFESTS")
-
     logs_dir = feeder_cfg.get("logs_dir")
     if logs_dir and not os.path.isabs(logs_dir):
         logs_dir = os.path.normpath(os.path.join(base_dir, logs_dir))
@@ -295,17 +279,22 @@ def main():
         if default_source and os.path.basename(loading_zone).lower() != default_source.lower():
             loading_zone = os.path.join(loading_zone, default_source)
         os.makedirs(loading_zone, exist_ok=True)
-        # 2.5.0 Query Teradata BATCH_RUNS for active batch & PROCESS_PID
+        # 2.5.0 Query Teradata BATCH_RUNS for active batch & PROCESS_PID (scoped to current source)
         try:
             tech_db = td_cfg.get("technical_database") or f"{os.environ.get('TDENV', '')}SIDFINTCH"
+            if not re.match(r"^[A-Za-z0-9_]+$", tech_db):
+                raise ValueError(f"Invalid technical database identifier: '{tech_db}'")
             conn_chk = get_teradata_connection(td_cfg)
             with conn_chk.cursor() as cur:
-                cur.execute(f"SELECT BATCH_ID, SOURCE, START_TIME, PROCESS_PID FROM {tech_db}.BATCH_RUNS WHERE STATUS = 'RUNNING'")
+                cur.execute(
+                    f"SELECT BATCH_ID, SOURCE, START_TIME, PROCESS_PID FROM {tech_db}.BATCH_RUNS WHERE STATUS = 'RUNNING' AND SOURCE = ?",
+                    [default_source]
+                )
                 row = cur.fetchone()
                 if row and row[3]:
                     db_pid = int(row[3])
                     if is_pid_alive(db_pid) and db_pid != os.getpid():
-                        logger.info(f"Active batch {row[0]} detected in BATCH_RUNS with running PID {db_pid}. Entering active waiting loop...")
+                        logger.info(f"Active batch {row[0]} (Source: {default_source}) detected in BATCH_RUNS with running PID {db_pid}. Entering active waiting loop...")
                         start_w = time.time()
                         while is_pid_alive(db_pid):
                             if time.time() - start_w > lock_timeout_sec:
@@ -347,7 +336,14 @@ def main():
             source_post_tasks = feeder_cfg.get("post_ingestion_tasks")
             post_tasks_file = None
             if source_post_tasks:
-                post_tasks_file = os.path.join(logs_dir, f"post_tasks_{default_source}_inflight.json")
+                mf_meta = parse_manifest_filename(in_flight_mf[0], default_source)
+                inf_src = mf_meta.get("source", default_source)
+                inf_ts = str(mf_meta.get("extract_timestamp", "")).replace(":", "").replace("-", "").replace(" ", "_")
+                inf_bid = mf_meta.get("batch_id", "INFLIGHT")
+                year_month = f"{inf_ts[:4]}-{inf_ts[4:6]}" if len(inf_ts) >= 6 else "UNKNOWN_DATE"
+                capsule_log_dir = os.path.join(logs_dir, year_month, f"BATCH_{inf_bid}_{inf_ts}")
+                os.makedirs(capsule_log_dir, exist_ok=True)
+                post_tasks_file = os.path.join(capsule_log_dir, f"POST_TASKS_{inf_src}_{inf_ts}_{inf_bid}.json")
                 try:
                     with open(post_tasks_file, "w", encoding="utf-8") as ptf:
                         json.dump(source_post_tasks, ptf, indent=2)
@@ -438,7 +434,10 @@ def main():
                         target_db=target_db,
                         target_table=target_table,
                         sample_file_path=header_full_path,
-                        default_type=schema_cfg.get("default_column_type", "VARCHAR(4000)")
+                        default_type=schema_cfg.get("default_column_type", "VARCHAR(4000)"),
+                        character_set=schema_cfg.get("character_set", "UNICODE"),
+                        auto_migrate_ddl=schema_cfg.get("auto_migrate_ddl", True),
+                        load_mode=schema_cfg.get("default_load_mode", "replace")
                     )
                     schema_statuses[target_table] = action
                 except Exception as e:
@@ -503,12 +502,9 @@ def main():
                 os.makedirs(capsule_log_dir, exist_ok=True)
 
                 post_tasks_file = os.path.join(capsule_log_dir, f"POST_TASKS_{source}_{clean_ts}_{batch_id}.json")
-                legacy_pt_file = os.path.join(logs_dir, f"post_tasks_{source}_{batch_id}.json")
                 try:
                     with open(post_tasks_file, "w", encoding="utf-8") as ptf:
                         json.dump(source_post_tasks, ptf, indent=2)
-                    with open(legacy_pt_file, "w", encoding="utf-8") as lptf:
-                        json.dump(source_post_tasks, lptf, indent=2)
                     logger.info(f"Generated source-specific post-tasks file for Orchestrator: {post_tasks_file}")
                 except Exception as e:
                     logger.warning(f"Could not write post-tasks file {post_tasks_file}: {e}")

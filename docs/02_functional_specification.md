@@ -67,8 +67,8 @@ mindmap
 - **Enforces FIFO chronology**: Organizes multi-batch queues in ascending chronological order (`oldest -> newest`).
 - **Validates payload stability**: Ensures all manifested files exist, are $>0$ bytes, and have static file sizes over a configurable settling window.
 - **Performs zero-disk schema inspection**: Reads header lines directly from `.zip` or `.gz` in memory.
-- **Supervises Teradata staging schemas**: Compares CSV headers against `DBC.ColumnsV`. If columns drifted or table is missing, executes `DROP TABLE` and creates a `NOPI` table with all payload columns as `VARCHAR(4000) UNICODE NOT CASESPECIFIC`.
-- **Vaults raw manifests**: Stores the original BICC manifest and audit documents (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json` and legacy `intake_receipt.json`) inside the Batch Capsule in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`.
+- **Supervises Teradata staging schemas**: Compares CSV headers against `DBC.ColumnsV`. If columns drifted or table is missing (and `auto_migrate_ddl` is `true` and `load_mode` is `replace`), executes `DROP TABLE` and creates a `NOPI` table with all payload columns as `VARCHAR(4000) CHARACTER SET <UNICODE|LATIN> NOT CASESPECIFIC`. Blocks destructive `DROP TABLE` if `auto_migrate_ddl` is `false` or `load_mode == 'append'`.
+- **Vaults raw manifests**: Stores the original BICC manifest and canonical audit receipt (`RECEIPT_<SOURCE>_<TS>_<BATCH_ID>.json`) inside the Batch Capsule in `ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/RAW/`.
 - **Synthesizes standardized manifests**: Generates `MANIFEST_<SOURCE>_<TIMESTAMP>_<BATCH_ID>.MF` containing MD5 checksums.
 - **Atomically transfers files**: Moves data payloads to `DATA/LANDING_ZONE/<SOURCE>/`.
 - **Bridges Source Post-Tasks**: Dumps source-specific post-ingestion tasks to `POST_TASKS_<SOURCE>_<TS>_<BATCH_ID>.json` and delegates to Orchestrator via `--post-tasks-file`.
@@ -106,8 +106,8 @@ sequenceDiagram
         Feeder->>Lock: Acquire lock (write os.getpid())
     end
 
-    Note over Feeder,BATCH_RUNS: 2. Active Orchestration Sentry
-    Feeder->>BATCH_RUNS: SELECT BATCH_ID, PROCESS_PID WHERE STATUS = 'RUNNING'
+    Note over Feeder,BATCH_RUNS: 2. Active Orchestration Sentry (Source-Scoped)
+    Feeder->>BATCH_RUNS: SELECT BATCH_ID, PROCESS_PID WHERE STATUS = 'RUNNING' AND SOURCE = ?
     alt Active Batch Running & PID Alive
         Feeder->>Feeder: Active polling wait loop until batch finishes
     end
@@ -235,7 +235,7 @@ Before files are moved to `LANDING_ZONE/<SOURCE>/`, the raw manifest is preserve
 ```
 DATA/ARCHIVE_ZONE/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<EXTRACT_TIMESTAMP>/RAW/
 ```
-Along with a canonical intake receipt audit document `RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json` (plus legacy `intake_receipt.json`) recording:
+Along with a canonical intake receipt audit document `RECEIPT_<SOURCE>_<EXTRACT_TIMESTAMP>_<BATCH_ID>.json` recording:
 - Extraction timestamp, Batch ID, and Source system.
 - Intake timestamp.
 - File sizes in bytes.
@@ -249,10 +249,10 @@ Along with a canonical intake receipt audit document `RECEIPT_<SOURCE>_<EXTRACT_
 - Upon normal or abnormal termination, an `atexit` cleanup handler unlinks the PID lock file.
 
 ### 6.4 Active Ingestion Sentry & In-Flight Crash Recovery
-- **Active Orchestrator Guard**: Before transferring any batch to `LANDING_ZONE/<SOURCE>`, the feeder checks if an orchestrator is actively running by inspecting `${TDENV}SIDFINTCH.BATCH_RUNS` and `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. If an active PID is alive, it waits until completion, preventing Teradata 2652 table lock errors.
+- **Active Orchestrator Guard**: Before transferring any batch to `LANDING_ZONE/<SOURCE>`, the feeder checks if an orchestrator is actively running for the same source by inspecting `${TDENV}SIDFINTCH.BATCH_RUNS` (`WHERE STATUS = 'RUNNING' AND SOURCE = ?`) and `LOADING_ZONE/<SOURCE>/.orchestrator.pid`. If an active PID is alive, it waits until completion, preventing Teradata 2652 table lock errors.
 - **Crash Recovery**: If an uncompleted batch (`*.MF`) exists in `LOADING_ZONE/<SOURCE>` and the associated orchestrator PID is dead, the feeder automatically initiates crash recovery:
   1. It bypasses drop zone scanning.
-  2. It generates `post_tasks_<source>_inflight.json` if source post-tasks exist.
+  2. It generates the canonical `POST_TASKS_<SOURCE>_<TS>_<BATCH_ID>.json` inside the batch log capsule (`LOGS/<SOURCE>/<YYYY-MM>/BATCH_<ID>_<TS>/`) if source post-tasks exist.
   3. It delegates directly to `orchestrator.py` to complete ingestion, verification, post-tasks, and archiving.
   4. Only after the in-flight batch is fully archived does the feeder return to scan `DROP_ZONE/<SOURCE>`.
 

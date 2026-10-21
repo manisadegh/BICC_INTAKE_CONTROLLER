@@ -22,6 +22,26 @@ logger = logging.getLogger("BICC_INTAKE_CONTROLLER")
 TECHNICAL_AUDIT_COLUMNS = {"INFA_BATCH_ID", "INFA_LAST_REPLICATED"}
 
 
+def validate_sql_identifier(name: str) -> str:
+    """
+    Validates that a SQL identifier (database, table, column, or character set)
+    contains only safe alphanumeric and underscore characters (SEC-01).
+    """
+    if not name or not re.match(r"^[A-Za-z0-9_]+$", str(name).strip()):
+        raise ValueError(f"Invalid SQL identifier: '{name}'")
+    return str(name).strip()
+
+
+def validate_column_type(col_type: str) -> str:
+    """
+    Validates that the default column data type matches VARCHAR(N).
+    """
+    cleaned = str(col_type).strip().upper() if col_type else ""
+    if not re.match(r"^VARCHAR\(\d+\)$", cleaned):
+        raise ValueError(f"Invalid column type specification: '{col_type}'")
+    return cleaned
+
+
 def clean_column_name(col_raw: str) -> str:
     """
     Sanitizes raw CSV column header strings into valid Teradata identifiers:
@@ -210,17 +230,29 @@ def get_teradata_table_columns(connection, target_db: str, target_table: str) ->
         cursor.close()
 
 
-def generate_staging_ddl(target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)") -> str:
+def generate_staging_ddl(
+    target_db: str,
+    target_table: str,
+    columns: List[str],
+    default_type: str = "VARCHAR(4000)",
+    character_set: str = "UNICODE"
+) -> str:
     """
     Generates Teradata DDL for a NOPI staging table with all payload columns
     typed as VARCHAR(4000) and standard audit columns appended.
     """
-    cols_sql = [f"    {c} {default_type} CHARACTER SET UNICODE NOT CASESPECIFIC" for c in columns]
+    safe_db = validate_sql_identifier(target_db)
+    safe_table = validate_sql_identifier(target_table)
+    safe_type = validate_column_type(default_type)
+    safe_charset = validate_sql_identifier(character_set).upper()
+    safe_cols = [validate_sql_identifier(c) for c in columns]
+
+    cols_sql = [f"    {c} {safe_type} CHARACTER SET {safe_charset} NOT CASESPECIFIC" for c in safe_cols]
     cols_sql.append("    INFA_LAST_REPLICATED TIMESTAMP(0)")
-    cols_sql.append("    INFA_BATCH_ID VARCHAR(100) CHARACTER SET UNICODE NOT CASESPECIFIC")
+    cols_sql.append(f"    INFA_BATCH_ID VARCHAR(100) CHARACTER SET {safe_charset} NOT CASESPECIFIC")
 
     cols_joined = ",\n".join(cols_sql)
-    ddl = f"""CREATE MULTISET TABLE {target_db}.{target_table} ,NO FALLBACK ,
+    ddl = f"""CREATE MULTISET TABLE {safe_db}.{safe_table} ,NO FALLBACK ,
      NO BEFORE JOURNAL,
      NO AFTER JOURNAL,
      CHECKSUM = DEFAULT,
@@ -233,58 +265,91 @@ NO PRIMARY INDEX;"""
     return ddl
 
 
-def recreate_staging_table(connection, target_db: str, target_table: str, columns: List[str], default_type: str = "VARCHAR(4000)"):
+def recreate_staging_table(
+    connection,
+    target_db: str,
+    target_table: str,
+    columns: List[str],
+    default_type: str = "VARCHAR(4000)",
+    character_set: str = "UNICODE"
+):
     """
     Executes DROP TABLE (if table exists) followed by CREATE MULTISET TABLE ... NO PRIMARY INDEX.
     """
+    safe_db = validate_sql_identifier(target_db)
+    safe_table = validate_sql_identifier(target_table)
     cursor = connection.cursor()
-    ddl = generate_staging_ddl(target_db, target_table, columns, default_type)
+    ddl = generate_staging_ddl(safe_db, safe_table, columns, default_type, character_set)
 
     # 1. Drop existing table
-    drop_sql = f"DROP TABLE {target_db}.{target_table};"
+    drop_sql = f"DROP TABLE {safe_db}.{safe_table};"
     try:
         cursor.execute(drop_sql)
-        logger.info(f"[{target_table}] Dropped existing table {target_db}.{target_table}")
+        logger.info(f"[{safe_table}] Dropped existing table {safe_db}.{safe_table}")
     except Exception as e:
         # Error 3807: Table does not exist, safe to ignore
         err_msg = str(e)
         if "3807" in err_msg or "does not exist" in err_msg.lower():
             pass
         else:
-            logger.warning(f"[{target_table}] Notice during DROP TABLE: {e}")
+            logger.warning(f"[{safe_table}] Notice during DROP TABLE: {e}")
 
     # 2. Create new table
     try:
         cursor.execute(ddl)
-        logger.info(f"[{target_table}] Successfully created NOPI staging table with {len(columns)} payload columns.")
+        logger.info(f"[{safe_table}] Successfully created NOPI staging table with {len(columns)} payload columns.")
     finally:
         cursor.close()
 
 
-def sync_entity_schema_if_drifted(connection, target_db: str, target_table: str, sample_file_path: str, default_type: str = "VARCHAR(4000)") -> Tuple[bool, str, List[str]]:
+def sync_entity_schema_if_drifted(
+    connection,
+    target_db: str,
+    target_table: str,
+    sample_file_path: str,
+    default_type: str = "VARCHAR(4000)",
+    character_set: str = "UNICODE",
+    auto_migrate_ddl: bool = True,
+    load_mode: str = "replace"
+) -> Tuple[bool, str, List[str]]:
     """
     Compares CSV/PECSV header columns in sample_file_path with the Teradata staging table.
-    If the table does not exist or columns have drifted:
-      Recreates the table using generate_staging_ddl.
+    Enforces auto_migrate_ddl configuration and blocks destructive DROP TABLE in append mode.
     Returns:
       (is_identical: bool, action: str, columns: list[str])
     """
+    safe_db = validate_sql_identifier(target_db)
+    safe_table = validate_sql_identifier(target_table)
     csv_cols = extract_csv_columns(sample_file_path)
-    td_cols = get_teradata_table_columns(connection, target_db, target_table)
+    td_cols = get_teradata_table_columns(connection, safe_db, safe_table)
 
     if td_cols is None:
-        logger.info(f"[{target_table}] Table does not exist in Teradata staging. Creating table...")
-        recreate_staging_table(connection, target_db, target_table, csv_cols, default_type)
+        if not auto_migrate_ddl:
+            raise RuntimeError(
+                f"[{safe_table}] Target table {safe_db}.{safe_table} does not exist and auto_migrate_ddl is disabled."
+            )
+        logger.info(f"[{safe_table}] Table does not exist in Teradata staging. Creating table...")
+        recreate_staging_table(connection, safe_db, safe_table, csv_cols, default_type, character_set)
         return False, "CREATED", csv_cols
 
     if csv_cols == td_cols:
-        logger.info(f"[{target_table}] Schema is identical ({len(csv_cols)} columns). No DDL modification needed.")
+        logger.info(f"[{safe_table}] Schema is identical ({len(csv_cols)} columns). No DDL modification needed.")
         return True, "IDENTICAL", csv_cols
 
     logger.warning(
-        f"[{target_table}] Schema drift detected!\n"
+        f"[{safe_table}] Schema drift detected!\n"
         f"  File columns ({len(csv_cols)}): {csv_cols}\n"
         f"  Table columns ({len(td_cols)}): {td_cols}"
     )
-    recreate_staging_table(connection, target_db, target_table, csv_cols, default_type)
+    if not auto_migrate_ddl:
+        raise RuntimeError(
+            f"[{safe_table}] Schema drift detected on {safe_db}.{safe_table} "
+            f"(file columns: {csv_cols}, table columns: {td_cols}) and auto_migrate_ddl is disabled."
+        )
+    if str(load_mode).strip().lower() == "append":
+        raise RuntimeError(
+            f"[{safe_table}] Schema drift detected on {safe_db}.{safe_table}, "
+            f"but destructive DROP TABLE is prohibited when load_mode is 'append'."
+        )
+    recreate_staging_table(connection, safe_db, safe_table, csv_cols, default_type, character_set)
     return False, "RECREATED", csv_cols
