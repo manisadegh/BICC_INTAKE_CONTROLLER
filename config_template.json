@@ -15,6 +15,8 @@
     "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
     "landing_zone": "../../DATA/LANDING_ZONE",
+    "loading_zone": "../../DATA/LOADING_ZONE",
+    "archive_zone": "../../DATA/ARCHIVE_ZONE",
     "python_executable": "python3",
     "trigger_orchestrator": true
   }

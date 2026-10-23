@@ -18,7 +18,7 @@
     ]
   },
   "schema_guard": {
-    "auto_migrate_ddl": true,
+    "auto_migrate_ddl": false,
     "default_column_type": "VARCHAR(4000)",
     "character_set": "UNICODE",
     "target_database": "${TDENV}SIDFINSTG",
@@ -28,6 +28,8 @@
     "orchestrator_dir": "../DATA_INGESTION_ORCHESTRATOR",
     "config_file": "config.json",
     "landing_zone": "../../DATA/LANDING_ZONE",
+    "loading_zone": "../../DATA/LOADING_ZONE",
+    "archive_zone": "../../DATA/ARCHIVE_ZONE",
     "python_executable": "python3"
   },
   "teradata": {
